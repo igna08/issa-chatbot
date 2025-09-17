@@ -28,6 +28,15 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBSITE_URL = os.getenv("WEBSITE_URL")
 SCHOOL_NAME = os.getenv("SCHOOL_NAME")
+
+# Validar variables de entorno
+if not OPENAI_API_KEY:
+    logger.error("OPENAI_API_KEY no encontrada en variables de entorno")
+if not WEBSITE_URL:
+    logger.error("WEBSITE_URL no encontrada en variables de entorno")
+if not SCHOOL_NAME:
+    logger.warning("SCHOOL_NAME no encontrada en variables de entorno, usando nombre por defecto")
+
 @dataclass
 class WebContent:
     url: str
@@ -349,41 +358,45 @@ Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. 
         """Actualiza el contenido del sitio web"""
         logger.info("Iniciando actualización de contenido...")
         
-        new_content = self.scraper.scrape_website()
-        existing_content = {c.url: c for c in self.db_manager.get_all_content()}
+        try:
+            new_content = self.scraper.scrape_website()
+            existing_content = {c.url: c for c in self.db_manager.get_all_content()}
+            
+            updated_count = 0
+            for content in new_content:
+                if (content.url not in existing_content or 
+                    existing_content[content.url].content_hash != content.content_hash):
+                    self.db_manager.save_web_content(content)
+                    updated_count += 1
+            
+            if updated_count > 0:
+                self.system_prompt = self._build_system_prompt()
+                logger.info(f"Contenido actualizado: {updated_count} páginas")
+            else:
+                logger.info("No hay cambios en el contenido")
         
-        updated_count = 0
-        for content in new_content:
-            if (content.url not in existing_content or 
-                existing_content[content.url].content_hash != content.content_hash):
-                self.db_manager.save_web_content(content)
-                updated_count += 1
-        
-        if updated_count > 0:
-            self.system_prompt = self._build_system_prompt()
-            logger.info(f"Contenido actualizado: {updated_count} páginas")
-        else:
-            logger.info("No hay cambios en el contenido")
+        except Exception as e:
+            logger.error(f"Error actualizando contenido: {e}")
     
     def get_response(self, chat_id: str, user_message: str, user_id: str = None) -> str:
         """Genera una respuesta para el usuario usando GPT-4"""
-        # Crear conversación si no existe
-        self.db_manager.create_conversation(chat_id, user_id)
-        
-        # Obtener historial
-        history = self.db_manager.get_conversation_history(chat_id)
-        
-        # Construir mensajes para OpenAI
-        messages = [{"role": "system", "content": self.system_prompt}]
-        
-        # Añadir historial reciente
-        for msg in history[-8:]:  # Últimos 8 mensajes para mantener contexto
-            messages.append({"role": msg["role"], "content": msg["content"]})
-        
-        # Añadir mensaje actual
-        messages.append({"role": "user", "content": user_message})
-        
         try:
+            # Crear conversación si no existe
+            self.db_manager.create_conversation(chat_id, user_id)
+            
+            # Obtener historial
+            history = self.db_manager.get_conversation_history(chat_id)
+            
+            # Construir mensajes para OpenAI
+            messages = [{"role": "system", "content": self.system_prompt}]
+            
+            # Añadir historial reciente
+            for msg in history[-8:]:  # Últimos 8 mensajes para mantener contexto
+                messages.append({"role": msg["role"], "content": msg["content"]})
+            
+            # Añadir mensaje actual
+            messages.append({"role": "user", "content": user_message})
+            
             # Llamada a OpenAI
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -419,10 +432,13 @@ def webhook_chat():
     global assistant
     
     if not assistant:
-        return jsonify({"text": "El asistente no está disponible en este momento."}), 500
+        logger.error("Assistant no inicializado")
+        return jsonify({"text": "El asistente no está disponible en este momento. Por favor intenta más tarde."}), 500
     
     try:
         data = request.json
+        logger.info(f"Received data: {data}")
+        
         message_body = data.get('body', '')
         external_id = data.get('externalId', f"web_{int(time.time())}")
         
@@ -431,6 +447,8 @@ def webhook_chat():
         
         # Usar externalId como chat_id para mantener contexto por usuario
         response = assistant.get_response(external_id, message_body, external_id)
+        
+        logger.info(f"Generated response: {response}")
         
         return jsonify({
             "text": response,
@@ -449,7 +467,13 @@ def chat():
 @app.route('/api/health', methods=['GET'])
 def health():
     """Endpoint de salud"""
-    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()})
+    global assistant
+    status = "ok" if assistant else "error"
+    return jsonify({
+        "status": status, 
+        "timestamp": datetime.now().isoformat(),
+        "assistant_initialized": assistant is not None
+    })
 
 @app.route('/api/update-content', methods=['POST'])
 def update_content():
@@ -466,35 +490,54 @@ def update_content():
         logger.error(f"Error actualizando contenido: {e}")
         return jsonify({"error": "Error actualizando contenido"}), 500
 
-def init_assistant(openai_api_key: str, website_url: str, school_name: str = ""):
+def init_assistant():
     """Inicializa el asistente"""
     global assistant
-    assistant = SchoolAssistant(openai_api_key, website_url, school_name)
+    
+    # Verificar variables de entorno
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY no está configurada")
+    if not WEBSITE_URL:
+        raise ValueError("WEBSITE_URL no está configurada")
+    
+    school_name = SCHOOL_NAME or "Colegio"
+    
+    logger.info(f"Inicializando asistente con URL: {WEBSITE_URL}")
+    assistant = SchoolAssistant(OPENAI_API_KEY, WEBSITE_URL, school_name)
     
     # Actualización inicial
     logger.info("Realizando scraping inicial...")
     assistant.update_content()
     logger.info("Sistema listo para usar")
 
-
 def setup_scheduler():
     """Configura actualizaciones automáticas diarias"""
     schedule.every().day.at("06:00").do(lambda: assistant.update_content() if assistant else None)
+
 @app.route("/chat.js")
 def serve_chat():
     return send_from_directory("static", "chat.js", mimetype="application/javascript")
-if __name__ == "__main__":
-    # Configuración - CAMBIAR ESTOS VALORES
 
-    # Inicializar asistente
-    print("🚀 Inicializando Agustín, tu asistente del colegio...")
-    init_assistant(OPENAI_API_KEY, WEBSITE_URL, SCHOOL_NAME)
-    
-    # Configurar actualizaciones automáticas
-    setup_scheduler()
-    
-    # Iniciar servidor Flask
-    print("🌐 Servidor listo en http://localhost:5000")
-    print("📱 API disponible en /api/chat")
-    
-    app.run(host='0.0.0.0', port=5000, debug=False)
+if __name__ == "__main__":
+    try:
+        # Inicializar asistente
+        print("🚀 Inicializando Agustín, tu asistente del colegio...")
+        init_assistant()
+        
+        # Configurar actualizaciones automáticas
+        setup_scheduler()
+        
+        # Iniciar servidor Flask
+        print("🌐 Servidor listo en http://localhost:5000")
+        print("📱 API disponible en /api/chat")
+        print("🏥 Health check en /api/health")
+        
+        app.run(host='0.0.0.0', port=5000, debug=False)
+        
+    except Exception as e:
+        logger.error(f"Error fatal al inicializar: {e}")
+        print(f"❌ Error al inicializar: {e}")
+        print("📋 Verifica que tu archivo .env tenga las variables correctas:")
+        print("   - OPENAI_API_KEY=tu_api_key")
+        print("   - WEBSITE_URL=https://tu-sitio.com")
+        print("   - SCHOOL_NAME=Nombre del Colegio")
