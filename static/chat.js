@@ -1,7 +1,7 @@
 (function() {
     // Configuración del widget
     const CHAT_CONFIG = {
-        apiUrl: '/api/chat', // URL de tu backend Python
+        apiUrl: 'https://issa-chatbot-sij4.onrender.com/api/chat', // URL de tu backend Python
         position: 'bottom-right',
         theme: {
             primaryColor: '#1a1a1a',
