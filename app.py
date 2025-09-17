@@ -1,3 +1,9 @@
+# Principales correcciones necesarias:
+
+# 1. PROBLEMA: El código de inicialización está dentro de if __name__ == "__main__"
+# En Render, esto no se ejecuta cuando usas gunicorn
+# SOLUCIÓN: Mover la inicialización fuera
+
 import os
 import sqlite3
 from fastapi.responses import FileResponse
@@ -29,11 +35,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBSITE_URL = os.getenv("WEBSITE_URL")
 SCHOOL_NAME = os.getenv("SCHOOL_NAME")
 
-# Validar variables de entorno
+# Validar variables de entorno INMEDIATAMENTE
 if not OPENAI_API_KEY:
     logger.error("OPENAI_API_KEY no encontrada en variables de entorno")
+    raise ValueError("OPENAI_API_KEY es requerida")
 if not WEBSITE_URL:
     logger.error("WEBSITE_URL no encontrada en variables de entorno")
+    raise ValueError("WEBSITE_URL es requerida")
 if not SCHOOL_NAME:
     logger.warning("SCHOOL_NAME no encontrada en variables de entorno, usando nombre por defecto")
 
@@ -52,47 +60,53 @@ class DatabaseManager:
     
     def init_database(self):
         """Inicializa las tablas de la base de datos"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Tabla para contenido web
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS web_content (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT UNIQUE NOT NULL,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Tabla para conversaciones
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT UNIQUE NOT NULL,
-                user_id TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Tabla para mensajes
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (chat_id) REFERENCES conversations (chat_id)
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Tabla para contenido web
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS web_content (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url TEXT UNIQUE NOT NULL,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Tabla para conversaciones
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT UNIQUE NOT NULL,
+                    user_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Tabla para mensajes
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (chat_id) REFERENCES conversations (chat_id)
+                )
+            ''')
+            
+            conn.commit()
+            conn.close()
+            logger.info("Base de datos inicializada correctamente")
+        except Exception as e:
+            logger.error(f"Error inicializando base de datos: {e}")
+            raise
     
+    # ... resto de métodos sin cambios ...
     def save_web_content(self, content: WebContent):
         """Guarda o actualiza contenido web"""
         conn = sqlite3.connect(self.db_path)
@@ -192,40 +206,48 @@ class WebScraper:
     
     def is_valid_url(self, url: str) -> bool:
         """Verifica si la URL es válida para scrapear"""
-        parsed = urlparse(url)
-        base_parsed = urlparse(self.base_url)
-        
-        return (parsed.netloc == base_parsed.netloc and 
-                url not in self.visited_urls and
-                not any(ext in url.lower() for ext in ['.pdf', '.jpg', '.png', '.gif', '.css', '.js']))
+        try:
+            parsed = urlparse(url)
+            base_parsed = urlparse(self.base_url)
+            
+            return (parsed.netloc == base_parsed.netloc and 
+                    url not in self.visited_urls and
+                    not any(ext in url.lower() for ext in ['.pdf', '.jpg', '.png', '.gif', '.css', '.js']))
+        except:
+            return False
     
     def extract_text_content(self, soup: BeautifulSoup) -> str:
         """Extrae el contenido de texto relevante"""
-        # Remover scripts, estilos y otros elementos no deseados
-        for element in soup(["script", "style", "nav", "footer", "header"]):
-            element.decompose()
-        
-        # Extraer texto de elementos principales
-        content_selectors = ['main', 'article', '.content', '#content', 'body']
-        content = ""
-        
-        for selector in content_selectors:
-            elements = soup.select(selector)
-            if elements:
-                content = elements[0].get_text(separator='\n', strip=True)
-                break
-        
-        if not content:
-            content = soup.get_text(separator='\n', strip=True)
-        
-        # Limpiar contenido
-        lines = [line.strip() for line in content.split('\n') if line.strip()]
-        return '\n'.join(lines)
+        try:
+            # Remover scripts, estilos y otros elementos no deseados
+            for element in soup(["script", "style", "nav", "footer", "header"]):
+                element.decompose()
+            
+            # Extraer texto de elementos principales
+            content_selectors = ['main', 'article', '.content', '#content', 'body']
+            content = ""
+            
+            for selector in content_selectors:
+                elements = soup.select(selector)
+                if elements:
+                    content = elements[0].get_text(separator='\n', strip=True)
+                    break
+            
+            if not content:
+                content = soup.get_text(separator='\n', strip=True)
+            
+            # Limpiar contenido
+            lines = [line.strip() for line in content.split('\n') if line.strip()]
+            return '\n'.join(lines)
+        except Exception as e:
+            logger.error(f"Error extrayendo contenido: {e}")
+            return ""
     
     def scrape_page(self, url: str) -> Optional[WebContent]:
         """Scrapea una página individual"""
         try:
-            response = self.session.get(url, timeout=10)
+            logger.info(f"Scrapeando: {url}")
+            response = self.session.get(url, timeout=15)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -237,7 +259,7 @@ class WebScraper:
             # Obtener contenido
             content = self.extract_text_content(soup)
             
-            if content:
+            if content and len(content.strip()) > 100:  # Mínimo contenido útil
                 content_hash = hashlib.md5(content.encode()).hexdigest()
                 return WebContent(
                     url=url,
@@ -254,12 +276,15 @@ class WebScraper:
     def find_internal_links(self, soup: BeautifulSoup, current_url: str) -> List[str]:
         """Encuentra enlaces internos en la página"""
         links = []
-        for link in soup.find_all('a', href=True):
-            href = link['href']
-            full_url = urljoin(current_url, href)
-            
-            if self.is_valid_url(full_url):
-                links.append(full_url)
+        try:
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                full_url = urljoin(current_url, href)
+                
+                if self.is_valid_url(full_url):
+                    links.append(full_url)
+        except Exception as e:
+            logger.error(f"Error encontrando enlaces: {e}")
         
         return links
     
@@ -267,58 +292,68 @@ class WebScraper:
         """Scrapea todo el sitio web"""
         content_list = []
         urls_to_visit = [self.base_url]
+        max_pages = 20  # Reducir para evitar timeouts
         
-        while urls_to_visit:
+        logger.info(f"Iniciando scraping de: {self.base_url}")
+        
+        while urls_to_visit and len(self.visited_urls) < max_pages:
             current_url = urls_to_visit.pop(0)
             
             if current_url in self.visited_urls:
                 continue
             
             self.visited_urls.add(current_url)
-            logger.info(f"Scrapeando: {current_url}")
             
             content = self.scrape_page(current_url)
             if content:
                 content_list.append(content)
+                logger.info(f"✓ Contenido extraído de: {current_url}")
                 
                 # Buscar más enlaces si no hemos encontrado demasiados
-                if len(self.visited_urls) < 50:  # Límite de páginas
+                if len(self.visited_urls) < max_pages:
                     try:
                         response = self.session.get(current_url, timeout=10)
                         soup = BeautifulSoup(response.content, 'html.parser')
                         new_links = self.find_internal_links(soup, current_url)
-                        urls_to_visit.extend(new_links)
+                        urls_to_visit.extend(new_links[:5])  # Limitar enlaces por página
                     except:
                         pass
             
             time.sleep(1)  # Ser respetuoso con el servidor
         
-        logger.info(f"Scraping completado. {len(content_list)} páginas procesadas.")
+        logger.info(f"Scraping completado. {len(content_list)} páginas procesadas de {len(self.visited_urls)} visitadas.")
         return content_list
 
 class SchoolAssistant:
     def __init__(self, openai_api_key: str, website_url: str, school_name: str = ""):
+        logger.info("Inicializando SchoolAssistant...")
         self.client = OpenAI(api_key=openai_api_key)
         self.website_url = website_url
         self.school_name = school_name
         self.db_manager = DatabaseManager()
         self.scraper = WebScraper(website_url)
         self.system_prompt = self._build_system_prompt()
+        logger.info("SchoolAssistant inicializado correctamente")
     
     def _build_system_prompt(self) -> str:
         """Construye el prompt del sistema con información del colegio"""
-        content_list = self.db_manager.get_all_content()
-        
-        # Organizar contenido por categorías
-        knowledge_sections = []
-        for content in content_list[:10]:  # Limitamos a 10 para no sobrecargar
-            section = f"""
+        try:
+            content_list = self.db_manager.get_all_content()
+            logger.info(f"Construyendo prompt con {len(content_list)} contenidos")
+            
+            # Organizar contenido por categorías
+            knowledge_sections = []
+            for content in content_list[:10]:  # Limitamos a 10 para no sobrecargar
+                section = f"""
 ### {content.title}
 {content.content[:1500]}{'...' if len(content.content) > 1500 else ''}
 """
-            knowledge_sections.append(section)
-        
-        knowledge_base = "\n".join(knowledge_sections)
+                knowledge_sections.append(section)
+            
+            knowledge_base = "\n".join(knowledge_sections)
+        except Exception as e:
+            logger.error(f"Error construyendo prompt: {e}")
+            knowledge_base = "Información del sitio web en proceso de carga..."
         
         return f"""Sos un asistente virtual del {self.school_name} y tu nombre es Agustín (por San Agustín). Sos argentino, amable y cordial. Tu objetivo es ayudar a las familias, estudiantes y visitantes de la mejor manera posible.
 
@@ -423,17 +458,58 @@ Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. 
 app = Flask(__name__)
 CORS(app)
 
-# Instancia global del asistente
+# ======== INICIALIZACIÓN AUTOMÁTICA ========
+# Esto se ejecuta cuando Flask/Gunicorn carga el módulo
 assistant = None
 
+def init_assistant():
+    """Inicializa el asistente"""
+    global assistant
+    
+    try:
+        logger.info("🚀 Inicializando Agustín, tu asistente del colegio...")
+        
+        school_name = SCHOOL_NAME or "Colegio"
+        
+        logger.info(f"Configuración:")
+        logger.info(f"- URL: {WEBSITE_URL}")
+        logger.info(f"- Escuela: {school_name}")
+        logger.info(f"- OpenAI API: {'✓ Configurada' if OPENAI_API_KEY else '✗ Falta'}")
+        
+        assistant = SchoolAssistant(OPENAI_API_KEY, WEBSITE_URL, school_name)
+        
+        # Realizar scraping inicial en background para no bloquear
+        try:
+            logger.info("Realizando scraping inicial...")
+            assistant.update_content()
+            logger.info("✓ Sistema completamente listo")
+        except Exception as e:
+            logger.warning(f"Scraping inicial falló, continuando: {e}")
+            # El asistente puede funcionar sin contenido inicial
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error fatal inicializando asistente: {e}")
+        return False
+
+# Intentar inicializar inmediatamente cuando se carga el módulo
+try:
+    success = init_assistant()
+    if not success:
+        logger.error("Inicialización falló")
+except Exception as e:
+    logger.error(f"Error en inicialización automática: {e}")
+
+# ======== ENDPOINTS ========
 @app.route('/api/webhook/website', methods=['POST'])
 def webhook_chat():
     """Endpoint compatible con el formato del widget"""
     global assistant
     
     if not assistant:
-        logger.error("Assistant no inicializado")
-        return jsonify({"text": "El asistente no está disponible en este momento. Por favor intenta más tarde."}), 500
+        logger.error("Assistant no inicializado - intentando reinicializar...")
+        if not init_assistant():
+            return jsonify({"text": "El asistente no está disponible en este momento. Por favor intenta más tarde."}), 500
     
     try:
         data = request.json
@@ -468,12 +544,26 @@ def chat():
 def health():
     """Endpoint de salud"""
     global assistant
-    status = "ok" if assistant else "error"
-    return jsonify({
-        "status": status, 
+    
+    status_info = {
+        "status": "ok" if assistant else "error",
         "timestamp": datetime.now().isoformat(),
-        "assistant_initialized": assistant is not None
-    })
+        "assistant_initialized": assistant is not None,
+        "environment": {
+            "openai_api_key": "configured" if OPENAI_API_KEY else "missing",
+            "website_url": "configured" if WEBSITE_URL else "missing",
+            "school_name": "configured" if SCHOOL_NAME else "using_default"
+        }
+    }
+    
+    if assistant:
+        try:
+            content_count = len(assistant.db_manager.get_all_content())
+            status_info["content_pages"] = content_count
+        except:
+            status_info["content_pages"] = "error"
+    
+    return jsonify(status_info)
 
 @app.route('/api/update-content', methods=['POST'])
 def update_content():
@@ -481,7 +571,8 @@ def update_content():
     global assistant
     
     if not assistant:
-        return jsonify({"error": "Asistente no inicializado"}), 500
+        if not init_assistant():
+            return jsonify({"error": "Asistente no inicializado"}), 500
     
     try:
         assistant.update_content()
@@ -490,44 +581,41 @@ def update_content():
         logger.error(f"Error actualizando contenido: {e}")
         return jsonify({"error": "Error actualizando contenido"}), 500
 
-def init_assistant():
-    """Inicializa el asistente"""
+@app.route('/api/reinit', methods=['POST'])
+def reinit():
+    """Endpoint para reinicializar el asistente"""
     global assistant
-    
-    # Verificar variables de entorno
-    if not OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY no está configurada")
-    if not WEBSITE_URL:
-        raise ValueError("WEBSITE_URL no está configurada")
-    
-    school_name = SCHOOL_NAME or "Colegio"
-    
-    logger.info(f"Inicializando asistente con URL: {WEBSITE_URL}")
-    assistant = SchoolAssistant(OPENAI_API_KEY, WEBSITE_URL, school_name)
-    
-    # Actualización inicial
-    logger.info("Realizando scraping inicial...")
-    assistant.update_content()
-    logger.info("Sistema listo para usar")
-
-def setup_scheduler():
-    """Configura actualizaciones automáticas diarias"""
-    schedule.every().day.at("06:00").do(lambda: assistant.update_content() if assistant else None)
+    try:
+        assistant = None
+        success = init_assistant()
+        if success:
+            return jsonify({"message": "Asistente reinicializado correctamente"})
+        else:
+            return jsonify({"error": "Error reinicializando asistente"}), 500
+    except Exception as e:
+        logger.error(f"Error reinicializando: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/chat.js")
 def serve_chat():
     return send_from_directory("static", "chat.js", mimetype="application/javascript")
 
+@app.route('/')
+def home():
+    """Página de inicio básica"""
+    return jsonify({
+        "message": "Agustín - Asistente del Colegio",
+        "status": "running",
+        "endpoints": {
+            "chat": "/api/chat",
+            "webhook": "/api/webhook/website",
+            "health": "/api/health",
+            "update": "/api/update-content"
+        }
+    })
+
 if __name__ == "__main__":
     try:
-        # Inicializar asistente
-        print("🚀 Inicializando Agustín, tu asistente del colegio...")
-        init_assistant()
-        
-        # Configurar actualizaciones automáticas
-        setup_scheduler()
-        
-        # Iniciar servidor Flask
         print("🌐 Servidor listo en http://localhost:5000")
         print("📱 API disponible en /api/chat")
         print("🏥 Health check en /api/health")
@@ -535,7 +623,7 @@ if __name__ == "__main__":
         app.run(host='0.0.0.0', port=5000, debug=False)
         
     except Exception as e:
-        logger.error(f"Error fatal al inicializar: {e}")
+        logger.error(f"Error fatal al inicializar servidor: {e}")
         print(f"❌ Error al inicializar: {e}")
         print("📋 Verifica que tu archivo .env tenga las variables correctas:")
         print("   - OPENAI_API_KEY=tu_api_key")
