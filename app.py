@@ -477,7 +477,7 @@ def init_assistant(openai_api_key: str, website_url: str, school_name: str = "")
     logger.info("Sistema listo para usar")
 
 @app.get("/")
-def read_root():
+def health():
     """A simple health check endpoint."""
     return {"status": "ok"}
 def setup_scheduler():
