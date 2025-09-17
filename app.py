@@ -13,7 +13,7 @@ import schedule
 from dataclasses import dataclass
 from typing import List, Dict, Optional
 import logging
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 
@@ -480,10 +480,9 @@ def init_assistant(openai_api_key: str, website_url: str, school_name: str = "")
 def setup_scheduler():
     """Configura actualizaciones automáticas diarias"""
     schedule.every().day.at("06:00").do(lambda: assistant.update_content() if assistant else None)
-@app.get("/chat.js")
-def read_root():
-    """Serve the chat-widget.js file."""
-    return FileResponse(os.path.join("static", "chat.js"))
+@app.route("/chat.js")
+def serve_chat():
+    return send_from_directory("static", "chat.js", mimetype="application/javascript")
 if __name__ == "__main__":
     # Configuración - CAMBIAR ESTOS VALORES
 
