@@ -1,0 +1,8 @@
+fastapi
+requests
+beautifulsoup4
+openai
+schedule
+flask
+flask-cors
+python-dotenv
