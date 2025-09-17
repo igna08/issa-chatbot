@@ -476,10 +476,14 @@ def init_assistant(openai_api_key: str, website_url: str, school_name: str = "")
     assistant.update_content()
     logger.info("Sistema listo para usar")
 
+@app.get("/")
+def read_root():
+    """A simple health check endpoint."""
+    return {"status": "ok"}
 def setup_scheduler():
     """Configura actualizaciones automáticas diarias"""
     schedule.every().day.at("06:00").do(lambda: assistant.update_content() if assistant else None)
-@app.get("/chat.js", tags=["Chat Widget"])
+@app.get("/chat.js")
 def read_root():
     """Serve the chat-widget.js file."""
     return FileResponse(os.path.join("static", "chat.js"))
