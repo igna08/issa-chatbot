@@ -476,10 +476,7 @@ def init_assistant(openai_api_key: str, website_url: str, school_name: str = "")
     assistant.update_content()
     logger.info("Sistema listo para usar")
 
-@app.get("/")
-def health():
-    """A simple health check endpoint."""
-    return {"status": "ok"}
+
 def setup_scheduler():
     """Configura actualizaciones automáticas diarias"""
     schedule.every().day.at("06:00").do(lambda: assistant.update_content() if assistant else None)
