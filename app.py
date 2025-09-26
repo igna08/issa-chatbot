@@ -1,15 +1,9 @@
-# Principales correcciones necesarias:
-
-# 1. PROBLEMA: El código de inicialización está dentro de if __name__ == "__main__"
-# En Render, esto no se ejecuta cuando usas gunicorn
-# SOLUCIÓN: Mover la inicialización fuera
-
 import os
 import sqlite3
 from fastapi.responses import FileResponse
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qs
 from openai import OpenAI
 from datetime import datetime, timedelta
 import hashlib
@@ -17,11 +11,12 @@ import json
 import time
 import schedule
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 import logging
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
+import re
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -106,7 +101,6 @@ class DatabaseManager:
             logger.error(f"Error inicializando base de datos: {e}")
             raise
     
-    # ... resto de métodos sin cambios ...
     def save_web_content(self, content: WebContent):
         """Guarda o actualiza contenido web"""
         conn = sqlite3.connect(self.db_path)
@@ -195,133 +189,313 @@ class DatabaseManager:
         return [{"role": msg[0], "content": msg[1], "timestamp": msg[2]} 
                 for msg in reversed(messages)]
 
-class WebScraper:
+class ImprovedWebScraper:
+    """Scraper mejorado para explorar exhaustivamente el sitio web"""
+    
     def __init__(self, base_url: str):
         self.base_url = base_url
+        self.domain = urlparse(base_url).netloc
         self.visited_urls = set()
+        self.failed_urls = set()
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
+        
+        # Patrones de URLs que probablemente no contengan contenido útil
+        self.skip_patterns = [
+            r'\.pdf$', r'\.jpg$', r'\.png$', r'\.gif$', r'\.css$', r'\.js$',
+            r'\.zip$', r'\.doc$', r'\.docx$', r'\.xls$', r'\.xlsx$',
+            r'/wp-admin/', r'/wp-content/', r'/wp-includes/',
+            r'#$',  # Enlaces que solo van a anclas
+            r'\?.*utm_', r'\.xml$', r'\.json$'
+        ]
     
-    def is_valid_url(self, url: str) -> bool:
-        """Verifica si la URL es válida para scrapear"""
+    def normalize_url(self, url: str) -> str:
+        """Normaliza la URL eliminando parámetros innecesarios y fragmentos"""
         try:
             parsed = urlparse(url)
-            base_parsed = urlparse(self.base_url)
+            # Eliminar fragmentos (#)
+            normalized = urlunparse((
+                parsed.scheme, parsed.netloc, parsed.path, 
+                parsed.params, parsed.query, ''
+            ))
+            # Eliminar trailing slash si no es la raíz
+            if normalized.endswith('/') and len(normalized) > len(f"{parsed.scheme}://{parsed.netloc}/"):
+                normalized = normalized.rstrip('/')
+            return normalized
+        except:
+            return url
+    
+    def is_valid_url(self, url: str) -> bool:
+        """Verifica si la URL es válida para scrapear de forma más exhaustiva"""
+        try:
+            parsed = urlparse(url)
             
-            return (parsed.netloc == base_parsed.netloc and 
-                    url not in self.visited_urls and
-                    not any(ext in url.lower() for ext in ['.pdf', '.jpg', '.png', '.gif', '.css', '.js']))
+            # Debe ser del mismo dominio
+            if parsed.netloc != self.domain:
+                return False
+            
+            # Normalizar URL
+            normalized_url = self.normalize_url(url)
+            
+            # No visitar URLs ya procesadas o fallidas
+            if normalized_url in self.visited_urls or normalized_url in self.failed_urls:
+                return False
+            
+            # Verificar patrones a evitar
+            for pattern in self.skip_patterns:
+                if re.search(pattern, url, re.IGNORECASE):
+                    return False
+            
+            return True
         except:
             return False
     
-    def extract_text_content(self, soup: BeautifulSoup) -> str:
-        """Extrae el contenido de texto relevante"""
+    def extract_text_content(self, soup: BeautifulSoup, url: str) -> str:
+        """Extrae el contenido de texto de forma más inteligente"""
         try:
-            # Remover scripts, estilos y otros elementos no deseados
-            for element in soup(["script", "style", "nav", "footer", "header"]):
+            # Remover elementos no deseados
+            for element in soup(["script", "style", "nav", "footer", "header", "noscript", 
+                               "iframe", "object", "embed", "form", "button"]):
                 element.decompose()
             
-            # Extraer texto de elementos principales
-            content_selectors = ['main', 'article', '.content', '#content', 'body']
-            content = ""
+            # Intentar encontrar el contenido principal usando varios selectores
+            main_content_selectors = [
+                'main', 'article', '.content', '#content', '.main-content',
+                '.post-content', '.entry-content', '.page-content',
+                '.container', '.wrapper', 'section'
+            ]
             
-            for selector in content_selectors:
+            main_content = ""
+            
+            # Buscar contenido principal
+            for selector in main_content_selectors:
                 elements = soup.select(selector)
                 if elements:
-                    content = elements[0].get_text(separator='\n', strip=True)
-                    break
+                    # Tomar el elemento con más texto
+                    best_element = max(elements, key=lambda x: len(x.get_text(strip=True)))
+                    main_content = best_element.get_text(separator='\n', strip=True)
+                    if len(main_content.strip()) > 200:  # Contenido sustancial
+                        break
             
-            if not content:
-                content = soup.get_text(separator='\n', strip=True)
+            # Si no encontramos contenido principal, usar body completo
+            if not main_content or len(main_content.strip()) < 200:
+                main_content = soup.get_text(separator='\n', strip=True)
             
-            # Limpiar contenido
-            lines = [line.strip() for line in content.split('\n') if line.strip()]
-            return '\n'.join(lines)
+            # Limpiar y estructurar el contenido
+            lines = []
+            for line in main_content.split('\n'):
+                cleaned_line = line.strip()
+                if cleaned_line and len(cleaned_line) > 2:  # Evitar líneas muy cortas
+                    lines.append(cleaned_line)
+            
+            # Eliminar duplicados consecutivos
+            final_lines = []
+            prev_line = ""
+            for line in lines:
+                if line != prev_line:
+                    final_lines.append(line)
+                    prev_line = line
+            
+            return '\n'.join(final_lines)
+            
         except Exception as e:
-            logger.error(f"Error extrayendo contenido: {e}")
+            logger.error(f"Error extrayendo contenido de {url}: {e}")
             return ""
     
-    def scrape_page(self, url: str) -> Optional[WebContent]:
-        """Scrapea una página individual"""
+    def extract_all_links(self, soup: BeautifulSoup, current_url: str) -> List[str]:
+        """Extrae TODOS los enlaces internos de manera más exhaustiva"""
+        links = set()
+        
         try:
-            logger.info(f"Scrapeando: {url}")
-            response = self.session.get(url, timeout=15)
+            # Enlaces en <a href="">
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                full_url = urljoin(current_url, href)
+                if self.is_valid_url(full_url):
+                    links.add(self.normalize_url(full_url))
+            
+            # Enlaces en botones o elementos con onclick
+            for element in soup.find_all(['button', 'div', 'span'], onclick=True):
+                onclick = element.get('onclick', '')
+                # Buscar URLs en JavaScript
+                url_matches = re.findall(r'["\']([^"\']*(?:\.html?|\.php|\/[^"\']*)[^"\']*)["\']', onclick)
+                for match in url_matches:
+                    full_url = urljoin(current_url, match)
+                    if self.is_valid_url(full_url):
+                        links.add(self.normalize_url(full_url))
+            
+            # Enlaces en data attributes
+            for element in soup.find_all(attrs={'data-url': True}):
+                data_url = element.get('data-url')
+                full_url = urljoin(current_url, data_url)
+                if self.is_valid_url(full_url):
+                    links.add(self.normalize_url(full_url))
+            
+            # Enlaces específicos para sitios educativos
+            # Buscar patrones comunes como /carrera/, /curso/, /programa/
+            education_patterns = [
+                r'href=["\']([^"\']*(?:carrera|curso|programa|materia|asignatura)[^"\']*)["\']',
+                r'href=["\']([^"\']*(?:profesorado|tecnicatura|especializacion)[^"\']*)["\']',
+                r'href=["\']([^"\']*(?:inscripcion|requisito|plan)[^"\']*)["\']'
+            ]
+            
+            page_html = str(soup)
+            for pattern in education_patterns:
+                matches = re.findall(pattern, page_html, re.IGNORECASE)
+                for match in matches:
+                    full_url = urljoin(current_url, match)
+                    if self.is_valid_url(full_url):
+                        links.add(self.normalize_url(full_url))
+        
+        except Exception as e:
+            logger.error(f"Error extrayendo enlaces de {current_url}: {e}")
+        
+        return list(links)
+    
+    def scrape_page(self, url: str) -> Optional[WebContent]:
+        """Scrapea una página individual con mejor manejo de errores"""
+        normalized_url = self.normalize_url(url)
+        
+        try:
+            logger.info(f"Scrapeando: {normalized_url}")
+            
+            response = self.session.get(normalized_url, timeout=20)
             response.raise_for_status()
+            
+            # Verificar que sea HTML
+            content_type = response.headers.get('content-type', '').lower()
+            if 'html' not in content_type:
+                logger.warning(f"Saltando {normalized_url} - no es HTML ({content_type})")
+                return None
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # Obtener título
-            title_element = soup.find('title')
-            title = title_element.get_text().strip() if title_element else url
+            title = self._extract_title(soup, normalized_url)
             
             # Obtener contenido
-            content = self.extract_text_content(soup)
+            content = self.extract_text_content(soup, normalized_url)
             
-            if content and len(content.strip()) > 100:  # Mínimo contenido útil
+            if content and len(content.strip()) > 50:  # Contenido mínimo útil
                 content_hash = hashlib.md5(content.encode()).hexdigest()
-                return WebContent(
-                    url=url,
+                
+                web_content = WebContent(
+                    url=normalized_url,
                     title=title,
                     content=content,
                     last_updated=datetime.now(),
                     content_hash=content_hash
                 )
-        
-        except Exception as e:
-            logger.error(f"Error scrapeando {url}: {e}")
-            return None
-    
-    def find_internal_links(self, soup: BeautifulSoup, current_url: str) -> List[str]:
-        """Encuentra enlaces internos en la página"""
-        links = []
-        try:
-            for link in soup.find_all('a', href=True):
-                href = link['href']
-                full_url = urljoin(current_url, href)
                 
-                if self.is_valid_url(full_url):
-                    links.append(full_url)
+                logger.info(f"✓ Contenido extraído: {title[:50]}... ({len(content)} chars)")
+                return web_content
+            else:
+                logger.warning(f"Contenido insuficiente en {normalized_url}")
+        
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error HTTP scrapeando {normalized_url}: {e}")
+            self.failed_urls.add(normalized_url)
         except Exception as e:
-            logger.error(f"Error encontrando enlaces: {e}")
+            logger.error(f"Error general scrapeando {normalized_url}: {e}")
+            self.failed_urls.add(normalized_url)
         
-        return links
+        return None
     
-    def scrape_website(self) -> List[WebContent]:
-        """Scrapea todo el sitio web"""
+    def _extract_title(self, soup: BeautifulSoup, url: str) -> str:
+        """Extrae el título de múltiples fuentes"""
+        # Prioridades de títulos
+        title_sources = [
+            lambda: soup.find('h1'),
+            lambda: soup.find('title'),
+            lambda: soup.find('meta', property='og:title'),
+            lambda: soup.find('meta', attrs={'name': 'title'}),
+        ]
+        
+        for source_func in title_sources:
+            try:
+                element = source_func()
+                if element:
+                    if element.name == 'meta':
+                        title = element.get('content', '').strip()
+                    else:
+                        title = element.get_text().strip()
+                    
+                    if title and len(title) > 3:
+                        return title
+            except:
+                continue
+        
+        # Título por defecto basado en URL
+        return urlparse(url).path.split('/')[-1] or url
+    
+    def scrape_website_exhaustive(self, max_pages: int = 100, max_depth: int = 5) -> List[WebContent]:
+        """Scraping exhaustivo con exploración en profundidad"""
         content_list = []
-        urls_to_visit = [self.base_url]
-        max_pages = 20  # Reducir para evitar timeouts
+        urls_by_depth = {0: [self.base_url]}
+        current_depth = 0
         
-        logger.info(f"Iniciando scraping de: {self.base_url}")
+        logger.info(f"🚀 Iniciando scraping exhaustivo de: {self.base_url}")
+        logger.info(f"📊 Límites: {max_pages} páginas máximo, {max_depth} niveles de profundidad")
         
-        while urls_to_visit and len(self.visited_urls) < max_pages:
-            current_url = urls_to_visit.pop(0)
-            
-            if current_url in self.visited_urls:
+        while current_depth < max_depth and len(content_list) < max_pages:
+            if current_depth not in urls_by_depth or not urls_by_depth[current_depth]:
+                current_depth += 1
                 continue
             
-            self.visited_urls.add(current_url)
+            logger.info(f"📂 Procesando nivel {current_depth} - {len(urls_by_depth[current_depth])} URLs")
             
-            content = self.scrape_page(current_url)
-            if content:
-                content_list.append(content)
-                logger.info(f"✓ Contenido extraído de: {current_url}")
+            current_level_urls = urls_by_depth[current_depth]
+            next_level_urls = set()
+            
+            for url in current_level_urls:
+                if len(content_list) >= max_pages:
+                    break
                 
-                # Buscar más enlaces si no hemos encontrado demasiados
-                if len(self.visited_urls) < max_pages:
+                normalized_url = self.normalize_url(url)
+                
+                if normalized_url in self.visited_urls:
+                    continue
+                
+                self.visited_urls.add(normalized_url)
+                
+                # Scrapear la página
+                content = self.scrape_page(normalized_url)
+                if content:
+                    content_list.append(content)
+                
+                # Obtener enlaces para el siguiente nivel
+                if current_depth < max_depth - 1 and len(content_list) < max_pages:
                     try:
-                        response = self.session.get(current_url, timeout=10)
+                        response = self.session.get(normalized_url, timeout=15)
                         soup = BeautifulSoup(response.content, 'html.parser')
-                        new_links = self.find_internal_links(soup, current_url)
-                        urls_to_visit.extend(new_links[:5])  # Limitar enlaces por página
-                    except:
-                        pass
+                        new_links = self.extract_all_links(soup, normalized_url)
+                        
+                        for link in new_links:
+                            if link not in self.visited_urls:
+                                next_level_urls.add(link)
+                        
+                        logger.info(f"🔗 Encontrados {len(new_links)} enlaces en {normalized_url}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Error obteniendo enlaces de {normalized_url}: {e}")
+                
+                # Pausa respetuosa
+                time.sleep(0.5)
             
-            time.sleep(1)  # Ser respetuoso con el servidor
+            # Preparar siguiente nivel
+            if next_level_urls and current_depth < max_depth - 1:
+                urls_by_depth[current_depth + 1] = list(next_level_urls)[:50]  # Limitar URLs por nivel
+            
+            current_depth += 1
         
-        logger.info(f"Scraping completado. {len(content_list)} páginas procesadas de {len(self.visited_urls)} visitadas.")
+        logger.info(f"✅ Scraping exhaustivo completado:")
+        logger.info(f"   📄 {len(content_list)} páginas con contenido útil")
+        logger.info(f"   🌐 {len(self.visited_urls)} URLs totales visitadas")
+        logger.info(f"   ❌ {len(self.failed_urls)} URLs fallidas")
+        logger.info(f"   📊 Promedio de caracteres por página: {sum(len(c.content) for c in content_list) // max(1, len(content_list))}")
+        
         return content_list
 
 class SchoolAssistant:
@@ -331,7 +505,7 @@ class SchoolAssistant:
         self.website_url = website_url
         self.school_name = school_name
         self.db_manager = DatabaseManager()
-        self.scraper = WebScraper(website_url)
+        self.scraper = ImprovedWebScraper(website_url)  # Usar scraper mejorado
         self.system_prompt = self._build_system_prompt()
         logger.info("SchoolAssistant inicializado correctamente")
     
@@ -341,16 +515,64 @@ class SchoolAssistant:
             content_list = self.db_manager.get_all_content()
             logger.info(f"Construyendo prompt con {len(content_list)} contenidos")
             
-            # Organizar contenido por categorías
+            # Organizar contenido por categorías y priorizar carreras
             knowledge_sections = []
-            for content in content_list[:10]:  # Limitamos a 10 para no sobrecargar
+            career_content = []
+            general_content = []
+            all_urls = {}  # Para mapear títulos a URLs
+            
+            for content in content_list:
+                # Almacenar URL para cada contenido
+                all_urls[content.title.lower()] = content.url
+                
+                # Priorizar contenido sobre carreras
+                if any(keyword in content.url.lower() or keyword in content.title.lower() 
+                      for keyword in ['carrera', 'profesorado', 'tecnicatura', 'curso', 'programa']):
+                    career_content.append(content)
+                else:
+                    general_content.append(content)
+            
+            # Crear índice de enlaces organizados
+            links_index = self._create_links_index(content_list)
+            
+            # Añadir contenido de carreras primero (más importante)
+            for content in career_content[:8]:  # Máximo 8 carreras
                 section = f"""
 ### {content.title}
-{content.content[:1500]}{'...' if len(content.content) > 1500 else ''}
+URL: {content.url}
+{content.content[:2000]}{'...' if len(content.content) > 2000 else ''}
+"""
+                knowledge_sections.append(section)
+            
+            # Añadir contenido general
+            for content in general_content[:7]:  # 7 páginas generales
+                section = f"""
+### {content.title}
+URL: {content.url}
+{content.content[:1200]}{'...' if len(content.content) > 1200 else ''}
 """
                 knowledge_sections.append(section)
             
             knowledge_base = "\n".join(knowledge_sections)
+            
+            # Añadir índice completo de enlaces
+            links_section = f"""
+
+## 🔗 ÍNDICE COMPLETO DE ENLACES DISPONIBLES:
+
+### CARRERAS Y PROFESORADOS:
+{links_index['careers']}
+
+### SECUNDARIOS:
+{links_index['secondary']}
+
+### INFORMACIÓN GENERAL:
+{links_index['general']}
+
+### OTROS ENLACES:
+{links_index['others']}
+
+IMPORTANTE: Cuando un usuario pregunte por un enlace específico, SIEMPRE proporcioná la URL completa correspondiente de este índice."""
         except Exception as e:
             logger.error(f"Error construyendo prompt: {e}")
             knowledge_base = "Información del sitio web en proceso de carga..."
@@ -362,35 +584,32 @@ class SchoolAssistant:
 - **Amable y cercano**: Tratás a todos con calidez, como si fueras un miembro más de la comunidad educativa  
 - **Directo y claro**: Respondés exactamente lo que te preguntan, sin dar información de más
 - **Preguntón cuando es necesario**: Si necesitás aclarar algo para dar una respuesta precisa, preguntás
+- **Experto en carreras**: Conocés perfectamente todas las carreras, profesorados y cursos que ofrece la institución
 
-## INFORMACIÓN DEL COLEGIO:
+## INFORMACIÓN COMPLETA DEL COLEGIO:
 {knowledge_base}
 
 ## CÓMO RESPONDÉS:
 1. **Saludá cordialmente** al inicio de cada conversación
 2. **Escuchá bien** qué te están preguntando específicamente
 3. **Respondé directamente** a la pregunta, sin dar vueltas
-4. **Si no tenés la info exacta**, decilo honestamente y ofrecé alternativas
-5. **Preguntá para aclarar** si la consulta no está clara
-6. **Usá un lenguaje natural argentino** pero profesional
+4. **Para consultas sobre carreras**: Proporcioná información detallada incluyendo duración, modalidad, requisitos
+5. **Si no tenés la info exacta**, decilo honestamente y ofrecé alternativas
+6. **Preguntá para aclarar** si la consulta no está clara
+7. **Usá un lenguaje natural argentino** pero profesional
 
 ## EJEMPLOS DE TU FORMA DE HABLAR:
 - "¡Hola! ¿Cómo andás? Soy Agustín, ¿en qué te puedo ayudar?"
-- "Perfecto, te cuento sobre las inscripciones..."
+- "Perfecto, te cuento sobre el Profesorado en Matemática..."
+- "Tenemos varias opciones en el área de educación, ¿te interesa alguna en particular?"
 - "Mirá, esa información específica no la tengo a mano, pero te puedo conectar con..."
-- "¿Me podrías aclarar si te referís a primaria o secundaria?"
-- "Dale, cualquier otra duda que tengas, preguntame nomás"
+- "¿Me podrías aclarar si te referís a nivel terciario o secundario?"
 
-Información
-
-
-Dirección: Ruta N°1 y Mendoza.
-
-Teléfonos: (03758) 424899.
-
-Email: info@institutosuperiorsanagustin.com   
-
-Atencion: Lunes a Viernes de 7:30 a 12:30hs y de 16:00 a 21hs.          
+## INFORMACIÓN DE CONTACTO:
+- Dirección: Ruta N°1 y Mendoza
+- Teléfonos: (03758) 424899
+- Email: info@institutosuperiorsanagustin.com   
+- Atención: Lunes a Viernes de 7:30 a 12:30hs y de 16:00 a 21hs
 
 ## LO QUE NO HACÉS:
 - No tirás parrafadas largas si no te las piden
@@ -400,29 +619,51 @@ Atencion: Lunes a Viernes de 7:30 a 12:30hs y de 16:00 a 21hs.
 
 Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. Tratá cada consulta con la importancia que se merece."""
     
-    def update_content(self):
-        """Actualiza el contenido del sitio web"""
-        logger.info("Iniciando actualización de contenido...")
+    def update_content_exhaustive(self):
+        """Actualización exhaustiva del contenido del sitio web"""
+        logger.info("🔄 Iniciando actualización exhaustiva de contenido...")
         
         try:
-            new_content = self.scraper.scrape_website()
+            # Usar el scraper mejorado
+            new_content = self.scraper.scrape_website_exhaustive(
+                max_pages=60,  # Aumentado para capturar más contenido
+                max_depth=4   # 4 niveles de profundidad
+            )
+            
             existing_content = {c.url: c for c in self.db_manager.get_all_content()}
             
             updated_count = 0
+            new_count = 0
+            
             for content in new_content:
-                if (content.url not in existing_content or 
-                    existing_content[content.url].content_hash != content.content_hash):
+                if content.url not in existing_content:
+                    # Contenido completamente nuevo
+                    self.db_manager.save_web_content(content)
+                    new_count += 1
+                elif existing_content[content.url].content_hash != content.content_hash:
+                    # Contenido actualizado
                     self.db_manager.save_web_content(content)
                     updated_count += 1
             
-            if updated_count > 0:
+            total_changes = updated_count + new_count
+            
+            if total_changes > 0:
                 self.system_prompt = self._build_system_prompt()
-                logger.info(f"Contenido actualizado: {updated_count} páginas")
+                logger.info(f"✅ Contenido actualizado:")
+                logger.info(f"   🆕 {new_count} páginas nuevas")
+                logger.info(f"   🔄 {updated_count} páginas modificadas") 
+                logger.info(f"   📊 Total de cambios: {total_changes}")
             else:
-                logger.info("No hay cambios en el contenido")
-        
+                logger.info("ℹ️  No hay cambios en el contenido")
+            
         except Exception as e:
-            logger.error(f"Error actualizando contenido: {e}")
+            logger.error(f"❌ Error en actualización exhaustiva: {e}")
+            raise
+    
+    # Mantener compatibilidad con método anterior
+    def update_content(self):
+        """Método para compatibilidad - llama al exhaustivo"""
+        self.update_content_exhaustive()
     
     def get_response(self, chat_id: str, user_message: str, user_id: str = None) -> str:
         """Genera una respuesta para el usuario usando GPT-4"""
@@ -447,7 +688,7 @@ Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. 
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=400,  # Respuestas más concisas
+                max_tokens=500,  # Aumentado para respuestas más completas sobre carreras
                 temperature=0.8,  # Más natural y conversacional
                 presence_penalty=0.2,  # Evita repetición
                 frequency_penalty=0.1   # Promueve variedad
@@ -470,7 +711,6 @@ app = Flask(__name__)
 CORS(app)
 
 # ======== INICIALIZACIÓN AUTOMÁTICA ========
-# Esto se ejecuta cuando Flask/Gunicorn carga el módulo
 assistant = None
 
 def init_assistant():
@@ -489,21 +729,20 @@ def init_assistant():
         
         assistant = SchoolAssistant(OPENAI_API_KEY, WEBSITE_URL, school_name)
         
-        # Realizar scraping inicial en background para no bloquear
+        # Realizar scraping exhaustivo inicial
         try:
-            logger.info("Realizando scraping inicial...")
-            assistant.update_content()
+            logger.info("Realizando scraping exhaustivo inicial...")
+            assistant.update_content_exhaustive()
             logger.info("✓ Sistema completamente listo")
         except Exception as e:
             logger.warning(f"Scraping inicial falló, continuando: {e}")
-            # El asistente puede funcionar sin contenido inicial
         
         return True
     except Exception as e:
         logger.error(f"Error fatal inicializando asistente: {e}")
         return False
 
-# Intentar inicializar inmediatamente cuando se carga el módulo
+# Intentar inicializar inmediatamente
 try:
     success = init_assistant()
     if not success:
@@ -532,7 +771,6 @@ def webhook_chat():
         if not message_body:
             return jsonify({"text": "Por favor escribí tu consulta."}), 400
         
-        # Usar externalId como chat_id para mantener contexto por usuario
         response = assistant.get_response(external_id, message_body, external_id)
         
         logger.info(f"Generated response: {response}")
@@ -571,6 +809,10 @@ def health():
         try:
             content_count = len(assistant.db_manager.get_all_content())
             status_info["content_pages"] = content_count
+            status_info["scraper_stats"] = {
+                "visited_urls": len(assistant.scraper.visited_urls),
+                "failed_urls": len(assistant.scraper.failed_urls)
+            }
         except:
             status_info["content_pages"] = "error"
     
@@ -578,7 +820,7 @@ def health():
 
 @app.route('/api/update-content', methods=['POST'])
 def update_content():
-    """Endpoint para actualizar contenido manualmente"""
+    """Endpoint para actualizar contenido manualmente (ahora exhaustivo)"""
     global assistant
     
     if not assistant:
@@ -586,11 +828,106 @@ def update_content():
             return jsonify({"error": "Asistente no inicializado"}), 500
     
     try:
-        assistant.update_content()
-        return jsonify({"message": "Contenido actualizado correctamente"})
+        assistant.update_content_exhaustive()
+        return jsonify({"message": "Contenido actualizado exhaustivamente"})
     except Exception as e:
         logger.error(f"Error actualizando contenido: {e}")
         return jsonify({"error": "Error actualizando contenido"}), 500
+
+@app.route('/api/links', methods=['GET'])
+def get_all_links():
+    """Endpoint para obtener todos los enlaces scrapeados organizados"""
+    global assistant
+    
+    if not assistant:
+        return jsonify({"error": "Asistente no inicializado"}), 500
+    
+    try:
+        content_list = assistant.db_manager.get_all_content()
+        links_index = assistant._create_links_index(content_list)
+        
+        # Crear respuesta estructurada
+        response = {
+            "total_links": len(content_list),
+            "categories": {
+                "careers_and_profesorados": {
+                    "count": len([c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
+                                                               for keyword in ['profesorado', 'carrera'])]),
+                    "links": links_index['careers'].split('\n') if links_index['careers'] != "No disponible" else []
+                },
+                "secondary_education": {
+                    "count": len([c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
+                                                               for keyword in ['secundario', 'maestro', 'gastronomia'])]),
+                    "links": links_index['secondary'].split('\n') if links_index['secondary'] != "No disponible" else []
+                },
+                "general_info": {
+                    "count": len([c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
+                                                               for keyword in ['inscripcion', 'requisito', 'contact', 'about', 'novedades'])]),
+                    "links": links_index['general'].split('\n') if links_index['general'] != "No disponible" else []
+                },
+                "others": {
+                    "count": len(content_list) - len([c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
+                                                                                    for keyword in ['profesorado', 'carrera', 'secundario', 'maestro', 'gastronomia', 'inscripcion', 'requisito', 'contact', 'about', 'novedades'])]),
+                    "links": links_index['others'].split('\n') if links_index['others'] != "No disponible" else []
+                }
+            },
+            "all_urls": [{"title": c.title, "url": c.url, "last_updated": c.last_updated.isoformat()} for c in content_list]
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        logger.error(f"Error obteniendo enlaces: {e}")
+        return jsonify({"error": "Error obteniendo enlaces"}), 500
+
+@app.route('/api/search-link', methods=['POST'])
+def search_link():
+    """Endpoint para buscar un enlace específico por nombre o palabra clave"""
+    global assistant
+    
+    if not assistant:
+        return jsonify({"error": "Asistente no inicializado"}), 500
+    
+    try:
+        data = request.json
+        query = data.get('query', '').lower().strip()
+        
+        if not query:
+            return jsonify({"error": "Consulta vacía"}), 400
+        
+        content_list = assistant.db_manager.get_all_content()
+        matches = []
+        
+        for content in content_list:
+            # Buscar en título y URL
+            if (query in content.title.lower() or 
+                query in content.url.lower() or
+                any(word in content.title.lower() for word in query.split()) or
+                any(word in content.url.lower() for word in query.split())):
+                
+                matches.append({
+                    "title": content.title,
+                    "url": content.url,
+                    "relevance_score": (
+                        content.title.lower().count(query) * 2 +  # Título vale más
+                        content.url.lower().count(query) +
+                        sum(content.title.lower().count(word) for word in query.split()) +
+                        sum(content.url.lower().count(word) for word in query.split())
+                    )
+                })
+        
+        # Ordenar por relevancia
+        matches.sort(key=lambda x: x['relevance_score'], reverse=True)
+        
+        return jsonify({
+            "query": query,
+            "total_matches": len(matches),
+            "matches": matches[:10]  # Top 10 resultados
+        })
+    
+    except Exception as e:
+        logger.error(f"Error buscando enlace: {e}")
+        return jsonify({"error": "Error buscando enlace"}), 500
 
 @app.route('/api/reinit', methods=['POST'])
 def reinit():
@@ -615,13 +952,16 @@ def serve_chat():
 def home():
     """Página de inicio básica"""
     return jsonify({
-        "message": "Agustín - Asistente del Colegio",
+        "message": "Agustín - Asistente del Colegio (Versión Mejorada)",
         "status": "running",
+        "features": ["Scraping exhaustivo", "Exploración en profundidad", "Detección inteligente de carreras", "Índice completo de enlaces"],
         "endpoints": {
             "chat": "/api/chat",
-            "webhook": "/api/webhook/website",
+            "webhook": "/api/webhook/website", 
             "health": "/api/health",
-            "update": "/api/update-content"
+            "update": "/api/update-content",
+            "links": "/api/links",
+            "search_link": "/api/search-link"
         }
     })
 
@@ -630,6 +970,7 @@ if __name__ == "__main__":
         print("🌐 Servidor listo en http://localhost:5000")
         print("📱 API disponible en /api/chat")
         print("🏥 Health check en /api/health")
+        print("🔄 Scraping mejorado y exhaustivo activado")
         
         app.run(host='0.0.0.0', port=5000, debug=False)
         
@@ -637,6 +978,3 @@ if __name__ == "__main__":
         logger.error(f"Error fatal al inicializar servidor: {e}")
         print(f"❌ Error al inicializar: {e}")
         print("📋 Verifica que tu archivo .env tenga las variables correctas:")
-        print("   - OPENAI_API_KEY=tu_api_key")
-        print("   - WEBSITE_URL=https://tu-sitio.com")
-        print("   - SCHOOL_NAME=Nombre del Colegio")
