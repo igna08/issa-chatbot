@@ -381,6 +381,17 @@ class SchoolAssistant:
 - "¿Me podrías aclarar si te referís a primaria o secundaria?"
 - "Dale, cualquier otra duda que tengas, preguntame nomás"
 
+Información
+
+
+Dirección: Ruta N°1 y Mendoza.
+
+Teléfonos: (03758) 424899.
+
+Email: info@institutosuperiorsanagustin.com   
+
+Atencion: Lunes a Viernes de 7:30 a 12:30hs y de 16:00 a 21hs.          
+
 ## LO QUE NO HACÉS:
 - No tirás parrafadas largas si no te las piden
 - No repetís información que ya diste
