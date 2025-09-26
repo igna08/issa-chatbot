@@ -750,4 +750,402 @@ class SchoolAssistantWithVectorStore:
             
             return {
                 "pages_tracked": len(tracking_data),
-                "vector_
+                "vector_store_files": vector_store.file_counts.total,
+                "last_update": self.last_update.isoformat() if self.last_update else None,
+                "visited_urls": len(self.scraper.visited_urls),
+                "failed_urls": len(self.scraper.failed_urls)
+            }
+        except Exception as e:
+            logger.error(f"Error obteniendo estadísticas: {e}")
+            return {"error": str(e)}
+
+# ======== FLASK API ========
+app = Flask(__name__)
+CORS(app)
+
+# Variable global para el asistente
+assistant = None
+
+def init_assistant():
+    """Inicializa el asistente con vector store"""
+    global assistant
+    
+    try:
+        logger.info("🚀 Inicializando Agustín con OpenAI Assistant + Vector Store...")
+        logger.info(f"📋 Configuración:")
+        logger.info(f"   - URL: {WEBSITE_URL}")
+        logger.info(f"   - Escuela: {SCHOOL_NAME}")
+        logger.info(f"   - Assistant ID: {OPENAI_ASSISTANT_ID}")
+        logger.info(f"   - Vector Store ID: {OPENAI_VECTOR_STORE_ID}")
+        
+        assistant = SchoolAssistantWithVectorStore(WEBSITE_URL, SCHOOL_NAME)
+        
+        # Actualización inicial
+        logger.info("🔄 Realizando actualización inicial...")
+        result = assistant.update_knowledge_base()
+        
+        if result.get("success"):
+            logger.info("✅ Sistema completamente listo!")
+            return True
+        else:
+            logger.warning(f"⚠️ Actualización inicial con problemas: {result}")
+            return True  # Continuar aunque haya warnings
+            
+    except Exception as e:
+        logger.error(f"❌ Error inicializando asistente: {e}")
+        return False
+
+# Inicializar automáticamente
+try:
+    success = init_assistant()
+    if not success:
+        logger.error("Inicialización falló")
+except Exception as e:
+    logger.error(f"Error en inicialización automática: {e}")
+
+# ======== ENDPOINTS ========
+
+@app.route('/api/webhook/website', methods=['POST'])
+def webhook_chat():
+    """Endpoint principal para chat con OpenAI Assistant"""
+    global assistant
+    
+    if not assistant:
+        logger.error("Assistant no inicializado")
+        if not init_assistant():
+            return jsonify({"text": "El asistente no está disponible. Por favor intenta más tarde."}), 500
+    
+    try:
+        data = request.json
+        logger.info(f"Datos recibidos: {data}")
+        
+        message_body = data.get('body', '').strip()
+        external_id = data.get('externalId', f"web_{int(time.time())}")
+        
+        if not message_body:
+            return jsonify({"text": "Por favor escribí tu consulta."}), 400
+        
+        # Usar external_id para mantener conversaciones persistentes
+        result = assistant.get_response(message_body, external_id)
+        
+        logger.info(f"Respuesta generada para {external_id}: {result['response'][:100]}...")
+        
+        return jsonify({
+            "text": result["response"],
+            "type": "text",
+            "thread_id": result["thread_id"],
+            "success": result["success"],
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    except Exception as e:
+        logger.error(f"Error en webhook: {e}")
+        return jsonify({"text": "Disculpá, tuve un problema técnico. Intentá de nuevo en un ratito."}), 500
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    """Endpoint alternativo para chat"""
+    return webhook_chat()
+
+@app.route('/api/update-knowledge', methods=['POST'])
+def update_knowledge():
+    """Endpoint para actualizar base de conocimiento manualmente"""
+    global assistant
+    
+    if not assistant:
+        return jsonify({"error": "Assistant not initialized"}), 500
+    
+    try:
+        logger.info("🔄 Actualización manual de base de conocimiento solicitada")
+        result = assistant.update_knowledge_base()
+        
+        if result.get("success"):
+            return jsonify({
+                "message": "Base de conocimiento actualizada exitosamente",
+                "result": result
+            })
+        else:
+            return jsonify({
+                "message": "Error actualizando base de conocimiento",
+                "result": result
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error actualizando conocimiento: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    """Health check completo del sistema"""
+    global assistant
+    
+    status = {
+        "status": "ok" if assistant else "error",
+        "timestamp": datetime.now().isoformat(),
+        "assistant_initialized": assistant is not None,
+        "environment": {
+            "openai_api_key": "✓ Configurada" if OPENAI_API_KEY else "✗ Falta",
+            "website_url": "✓ Configurada" if WEBSITE_URL else "✗ Falta",
+            "assistant_id": "✓ Configurado" if OPENAI_ASSISTANT_ID else "✗ Falta",
+            "vector_store_id": "✓ Configurado" if OPENAI_VECTOR_STORE_ID else "✗ Falta",
+            "school_name": SCHOOL_NAME
+        }
+    }
+    
+    if assistant:
+        try:
+            stats = assistant.get_stats()
+            status["stats"] = stats
+            
+            # Verificar conexión con OpenAI
+            try:
+                assistant_info = assistant.assistant_manager.client.beta.assistants.retrieve(
+                    OPENAI_ASSISTANT_ID
+                )
+                status["openai_connection"] = "✓ Conectado"
+                status["assistant_name"] = assistant_info.name
+            except Exception as e:
+                status["openai_connection"] = f"✗ Error: {str(e)}"
+                
+        except Exception as e:
+            status["stats_error"] = str(e)
+    
+    return jsonify(status)
+
+@app.route('/api/reinit', methods=['POST'])
+def reinit():
+    """Reinicializar sistema completo"""
+    global assistant
+    
+    try:
+        logger.info("🔄 Reinicialización manual solicitada")
+        assistant = None
+        success = init_assistant()
+        
+        if success:
+            stats = assistant.get_stats() if assistant else {}
+            return jsonify({
+                "message": "Sistema reinicializado exitosamente",
+                "timestamp": datetime.now().isoformat(),
+                "stats": stats
+            })
+        else:
+            return jsonify({"error": "Error reinicializando sistema"}), 500
+    
+    except Exception as e:
+        logger.error(f"Error reinicializando: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/threads/<external_id>/clear', methods=['POST'])
+def clear_thread(external_id):
+    """Limpia un thread específico (inicia conversación nueva)"""
+    global assistant
+    
+    if not assistant:
+        return jsonify({"error": "Assistant not initialized"}), 500
+    
+    try:
+        # Eliminar mapeo de thread
+        conn = sqlite3.connect(assistant.assistant_manager.db_manager.db_path)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM conversation_threads WHERE external_id = ?', (external_id,))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({
+            "message": f"Thread para {external_id} eliminado. Próxima conversación será nueva.",
+            "external_id": external_id
+        })
+        
+    except Exception as e:
+        logger.error(f"Error limpiando thread: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/threads', methods=['GET'])
+def list_threads():
+    """Lista todos los threads activos"""
+    global assistant
+    
+    if not assistant:
+        return jsonify({"error": "Assistant not initialized"}), 500
+    
+    try:
+        conn = sqlite3.connect(assistant.assistant_manager.db_manager.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT external_id, thread_id, created_at, last_activity 
+            FROM conversation_threads 
+            ORDER BY last_activity DESC 
+            LIMIT 50
+        ''')
+        
+        threads = []
+        for row in cursor.fetchall():
+            threads.append({
+                "external_id": row[0],
+                "thread_id": row[1],
+                "created_at": row[2],
+                "last_activity": row[3]
+            })
+        
+        conn.close()
+        
+        return jsonify({
+            "threads": threads,
+            "total": len(threads)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error listando threads: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/vector-store/info', methods=['GET'])
+def vector_store_info():
+    """Información del vector store"""
+    global assistant
+    
+    if not assistant:
+        return jsonify({"error": "Assistant not initialized"}), 500
+    
+    try:
+        vector_store = assistant.assistant_manager.client.beta.vector_stores.retrieve(
+            OPENAI_VECTOR_STORE_ID
+        )
+        
+        # Obtener archivos del vector store
+        files = assistant.assistant_manager.client.beta.vector_stores.files.list(
+            vector_store_id=OPENAI_VECTOR_STORE_ID,
+            limit=10
+        )
+        
+        return jsonify({
+            "vector_store": {
+                "id": vector_store.id,
+                "name": vector_store.name,
+                "status": vector_store.status,
+                "file_counts": {
+                    "total": vector_store.file_counts.total,
+                    "in_progress": vector_store.file_counts.in_progress,
+                    "completed": vector_store.file_counts.completed,
+                    "failed": vector_store.file_counts.failed,
+                    "cancelled": vector_store.file_counts.cancelled
+                },
+                "created_at": vector_store.created_at,
+                "last_active_at": vector_store.last_active_at
+            },
+            "recent_files": [
+                {
+                    "id": f.id,
+                    "status": f.status,
+                    "created_at": f.created_at,
+                    "last_error": f.last_error.message if f.last_error else None
+                }
+                for f in files.data
+            ]
+        })
+        
+    except Exception as e:
+        logger.error(f"Error obteniendo info del vector store: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/')
+def home():
+    """Página principal con información del sistema"""
+    global assistant
+    
+    stats = {}
+    if assistant:
+        try:
+            stats = assistant.get_stats()
+        except:
+            stats = {"error": "Error obteniendo estadísticas"}
+    
+    return jsonify({
+        "message": f"Agustín - Asistente de {SCHOOL_NAME}",
+        "version": "2.0 - OpenAI Assistant + Vector Store",
+        "status": "running",
+        "features": [
+            "OpenAI Assistant nativo integrado",
+            "Vector Store para base de conocimiento",
+            "Conversaciones persistentes por thread",
+            "Scraping exhaustivo automatizado",
+            "Actualización automática de conocimiento",
+            "Sistema de tracking de contenido"
+        ],
+        "endpoints": {
+            "chat": "/api/chat",
+            "webhook": "/api/webhook/website",
+            "update_knowledge": "/api/update-knowledge",
+            "health": "/api/health",
+            "reinit": "/api/reinit",
+            "threads": "/api/threads",
+            "clear_thread": "/api/threads/<external_id>/clear",
+            "vector_store_info": "/api/vector-store/info"
+        },
+        "configuration": {
+            "assistant_id": OPENAI_ASSISTANT_ID,
+            "vector_store_id": OPENAI_VECTOR_STORE_ID,
+            "school_name": SCHOOL_NAME,
+            "website_url": WEBSITE_URL
+        },
+        "stats": stats
+    })
+
+# ======== TAREAS PROGRAMADAS ========
+def scheduled_update():
+    """Actualización programada cada 6 horas"""
+    global assistant
+    
+    if assistant:
+        try:
+            logger.info("🕐 Ejecutando actualización programada...")
+            result = assistant.update_knowledge_base()
+            logger.info(f"✅ Actualización programada completada: {result}")
+        except Exception as e:
+            logger.error(f"Error en actualización programada: {e}")
+
+# Programar actualizaciones automáticas
+schedule.every(6).hours.do(scheduled_update)
+
+def run_scheduler():
+    """Ejecuta el scheduler en background"""
+    while True:
+        schedule.run_pending()
+        time.sleep(60)
+
+# Iniciar scheduler en thread separado
+scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+scheduler_thread.start()
+
+if __name__ == "__main__":
+    try:
+        print("=" * 60)
+        print("🎓 AGUSTÍN - ASISTENTE EDUCATIVO v2.0")
+        print("=" * 60)
+        print("🌐 Servidor iniciado en http://localhost:5000")
+        print("🤖 OpenAI Assistant + Vector Store integrado")
+        print("📚 Base de conocimiento actualizable automáticamente")
+        print("💬 Conversaciones persistentes por thread")
+        print("⏰ Actualizaciones automáticas cada 6 horas")
+        print("-" * 60)
+        print("📋 CONFIGURACIÓN:")
+        print(f"   • Assistant ID: {OPENAI_ASSISTANT_ID}")
+        print(f"   • Vector Store ID: {OPENAI_VECTOR_STORE_ID}")
+        print(f"   • Escuela: {SCHOOL_NAME}")
+        print(f"   • Website: {WEBSITE_URL}")
+        print("-" * 60)
+        print("🔗 ENDPOINTS DISPONIBLES:")
+        print("   • Chat: /api/webhook/website")
+        print("   • Health: /api/health")
+        print("   • Actualizar: /api/update-knowledge")
+        print("   • Threads: /api/threads")
+        print("   • Vector Store: /api/vector-store/info")
+        print("=" * 60)
+        
+        app.run(host='0.0.0.0', port=5000, debug=False)
+        
+    except Exception as e:
+        logger.error(f"Error fatal al inicializar servidor: {e}")
+        print(f"❌ Error al inicializar: {e}")
+        print("📋 Verifica tu archivo .env con las variables necesarias:")
