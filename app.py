@@ -1048,6 +1048,10 @@ def vector_store_info():
     except Exception as e:
         logger.error(f"Error obteniendo info del vector store: {e}")
         return jsonify({"error": str(e)}), 500
+        
+@app.route("/chat.js")
+def serve_chat():
+    return send_from_directory("static", "chat.js", mimetype="application/javascript")
 
 @app.route('/')
 def home():
