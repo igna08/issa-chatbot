@@ -475,11 +475,11 @@ class OpenAIAssistantManager:
         """Verifica que el assistant y vector store existen"""
         try:
             # Verificar assistant
-            assistant = self.client.beta.assistants.retrieve(self.assistant_id)
+            assistant = self.client.assistants.retrieve(self.assistant_id)
             logger.info(f"✓ Assistant encontrado: {assistant.name}")
             
             # Verificar vector store
-            vector_store = self.client.beta.vector_stores.retrieve(self.vector_store_id)
+            vector_store = self.client.vector_stores.retrieve(self.vector_store_id)
             logger.info(f"✓ Vector Store encontrado: {vector_store.name}")
             
             # Guardar configuración
@@ -535,7 +535,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             logger.info(f"🔄 Actualizando vector store con {len(content_list)} documentos...")
             
             # Obtener archivos actuales en el vector store
-            current_files = self.client.beta.vector_stores.files.list(
+            current_files = self.client.vector_stores.files.list(
                 vector_store_id=self.vector_store_id
             )
             current_file_ids = [f.id for f in current_files.data]
@@ -563,7 +563,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
                     old_file_id = tracking_data[content.url].get('file_id')
                     if old_file_id and old_file_id in current_file_ids:
                         try:
-                            self.client.beta.vector_stores.files.delete(
+                            self.client.vector_stores.files.delete(
                                 vector_store_id=self.vector_store_id,
                                 file_id=old_file_id
                             )
@@ -584,7 +584,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             if new_files:
                 logger.info(f"📤 Subiendo {len(new_files)} archivos al vector store...")
                 
-                batch_response = self.client.beta.vector_stores.file_batches.create(
+                batch_response = self.client.vector_stores.file_batches.create(
                     vector_store_id=self.vector_store_id,
                     file_ids=new_files
                 )
@@ -593,7 +593,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
                 logger.info("⏳ Esperando procesamiento de archivos...")
                 while batch_response.status in ['in_progress', 'cancelling']:
                     time.sleep(2)
-                    batch_response = self.client.beta.vector_stores.file_batches.retrieve(
+                    batch_response = self.client.vector_stores.file_batches.retrieve(
                         vector_store_id=self.vector_store_id,
                         batch_id=batch_response.id
                     )
@@ -624,7 +624,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             
             # Crear thread si no existe
             if not thread_id:
-                thread = self.client.beta.threads.create()
+                thread = self.client.threads.create()
                 thread_id = thread.id
                 logger.info(f"🆕 Nuevo thread creado: {thread_id}")
                 
@@ -635,14 +635,14 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
                 logger.info(f"🔄 Usando thread existente: {thread_id}")
             
             # Añadir mensaje del usuario
-            self.client.beta.threads.messages.create(
+            self.client.threads.messages.create(
                 thread_id=thread_id,
                 role="user",
                 content=user_message
             )
             
             # Ejecutar assistant
-            run = self.client.beta.threads.runs.create(
+            run = self.client.threads.runs.create(
                 thread_id=thread_id,
                 assistant_id=self.assistant_id
             )
@@ -654,14 +654,14 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             while run.status in ['queued', 'in_progress', 'cancelling'] and wait_time < max_wait_time:
                 time.sleep(1)
                 wait_time += 1
-                run = self.client.beta.threads.runs.retrieve(
+                run = self.client.threads.runs.retrieve(
                     thread_id=thread_id,
                     run_id=run.id
                 )
             
             if run.status == 'completed':
                 # Obtener mensajes
-                messages = self.client.beta.threads.messages.list(
+                messages = self.client.threads.messages.list(
                     thread_id=thread_id,
                     order='desc',
                     limit=1
