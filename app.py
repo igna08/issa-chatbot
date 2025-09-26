@@ -1,15 +1,14 @@
 import os
 import sqlite3
-from fastapi.responses import FileResponse
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, urlunparse, parse_qs
+from urllib.parse import urljoin, urlparse, urlunparse
 from openai import OpenAI
 from datetime import datetime, timedelta
 import hashlib
 import json
 import time
-import schedule
+import tempfile
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Set
 import logging
@@ -17,6 +16,8 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 import re
+import threading
+import schedule
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -25,20 +26,31 @@ logger = logging.getLogger(__name__)
 # Cargar variables del archivo .env
 load_dotenv()
 
-# Acceder a las variables
+# Variables de entorno
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WEBSITE_URL = os.getenv("WEBSITE_URL")
 SCHOOL_NAME = os.getenv("SCHOOL_NAME")
+OPENAI_ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
+OPENAI_VECTOR_STORE_ID = os.getenv("OPENAI_VECTOR_STORE_ID")
 
-# Validar variables de entorno INMEDIATAMENTE
+# Validar variables críticas
 if not OPENAI_API_KEY:
     logger.error("OPENAI_API_KEY no encontrada en variables de entorno")
     raise ValueError("OPENAI_API_KEY es requerida")
 if not WEBSITE_URL:
     logger.error("WEBSITE_URL no encontrada en variables de entorno")
     raise ValueError("WEBSITE_URL es requerida")
+if not OPENAI_ASSISTANT_ID:
+    logger.error("OPENAI_ASSISTANT_ID no encontrada en variables de entorno")
+    raise ValueError("OPENAI_ASSISTANT_ID es requerida")
+if not OPENAI_VECTOR_STORE_ID:
+    logger.error("OPENAI_VECTOR_STORE_ID no encontrada en variables de entorno")
+    raise ValueError("OPENAI_VECTOR_STORE_ID es requerida")
+
+# Variables opcionales
 if not SCHOOL_NAME:
-    logger.warning("SCHOOL_NAME no encontrada en variables de entorno, usando nombre por defecto")
+    logger.warning("SCHOOL_NAME no encontrada, usando nombre por defecto")
+    SCHOOL_NAME = "Instituto Superior"
 
 @dataclass
 class WebContent:
@@ -49,6 +61,7 @@ class WebContent:
     content_hash: str
 
 class DatabaseManager:
+    """Manejo de base de datos local para tracking"""
     def __init__(self, db_path: str = "school_assistant.db"):
         self.db_path = db_path
         self.init_database()
@@ -59,38 +72,38 @@ class DatabaseManager:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Tabla para contenido web
+            # Tabla para tracking de contenido web
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS web_content (
+                CREATE TABLE IF NOT EXISTS web_content_tracking (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     url TEXT UNIQUE NOT NULL,
                     title TEXT NOT NULL,
-                    content TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
+                    file_id TEXT,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_scraped TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Tabla para configuración del asistente
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS assistant_config (
+                    id INTEGER PRIMARY KEY,
+                    assistant_id TEXT NOT NULL,
+                    vector_store_id TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Tabla para conversaciones
+            # Tabla para threads de conversación
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS conversations (
+                CREATE TABLE IF NOT EXISTS conversation_threads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id TEXT UNIQUE NOT NULL,
-                    user_id TEXT,
+                    external_id TEXT UNIQUE NOT NULL,
+                    thread_id TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Tabla para mensajes
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (chat_id) REFERENCES conversations (chat_id)
                 )
             ''')
             
@@ -101,119 +114,86 @@ class DatabaseManager:
             logger.error(f"Error inicializando base de datos: {e}")
             raise
     
-    def save_web_content(self, content: WebContent):
-        """Guarda o actualiza contenido web"""
+    def save_content_tracking(self, content: WebContent, file_id: str = None):
+        """Guarda tracking de contenido web"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
-            INSERT OR REPLACE INTO web_content 
-            (url, title, content, content_hash, last_updated)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (content.url, content.title, content.content, 
-              content.content_hash, content.last_updated))
+            INSERT OR REPLACE INTO web_content_tracking 
+            (url, title, content_hash, file_id, last_updated, last_scraped)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (content.url, content.title, content.content_hash, file_id, content.last_updated))
         
         conn.commit()
         conn.close()
     
-    def get_all_content(self) -> List[WebContent]:
-        """Obtiene todo el contenido web"""
+    def get_content_tracking(self) -> List[Dict]:
+        """Obtiene tracking de contenido"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('SELECT url, title, content, content_hash, last_updated FROM web_content ORDER BY last_updated DESC')
+        cursor.execute('''
+            SELECT url, title, content_hash, file_id, last_updated, last_scraped 
+            FROM web_content_tracking 
+            ORDER BY last_updated DESC
+        ''')
         rows = cursor.fetchall()
-        
         conn.close()
         
-        return [WebContent(
-            url=row[0],
-            title=row[1], 
-            content=row[2],
-            content_hash=row[3],
-            last_updated=datetime.fromisoformat(row[4])
-        ) for row in rows]
+        return [
+            {
+                "url": row[0], "title": row[1], "content_hash": row[2],
+                "file_id": row[3], "last_updated": row[4], "last_scraped": row[5]
+            }
+            for row in rows
+        ]
     
-    def create_conversation(self, chat_id: str, user_id: str = None) -> str:
-        """Crea una nueva conversación"""
+    def save_thread_mapping(self, external_id: str, thread_id: str):
+        """Guarda mapeo de thread para conversaciones"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
-            INSERT OR IGNORE INTO conversations (chat_id, user_id)
-            VALUES (?, ?)
-        ''', (chat_id, user_id))
-        
-        conn.commit()
-        conn.close()
-        return chat_id
-    
-    def save_message(self, chat_id: str, role: str, content: str):
-        """Guarda un mensaje en la conversación"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Actualizar última actividad
-        cursor.execute('''
-            UPDATE conversations 
-            SET last_activity = CURRENT_TIMESTAMP 
-            WHERE chat_id = ?
-        ''', (chat_id,))
-        
-        # Guardar mensaje
-        cursor.execute('''
-            INSERT INTO messages (chat_id, role, content)
-            VALUES (?, ?, ?)
-        ''', (chat_id, role, content))
+            INSERT OR REPLACE INTO conversation_threads 
+            (external_id, thread_id, last_activity)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        ''', (external_id, thread_id))
         
         conn.commit()
         conn.close()
     
-    def get_conversation_history(self, chat_id: str, limit: int = 20) -> List[Dict]:
-        """Obtiene el historial de una conversación - CORREGIDO"""
+    def get_thread_id(self, external_id: str) -> Optional[str]:
+        """Obtiene thread_id para un external_id"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT role, content, timestamp 
-            FROM messages 
-            WHERE chat_id = ? 
-            ORDER BY timestamp ASC
-            LIMIT ?
-        ''', (chat_id, limit))
+            SELECT thread_id FROM conversation_threads 
+            WHERE external_id = ?
+        ''', (external_id,))
         
-        messages = cursor.fetchall()
+        result = cursor.fetchone()
         conn.close()
         
-        # Devolver en orden cronológico (ya ordenado ASC en la query)
-        return [{"role": msg[0], "content": msg[1], "timestamp": msg[2]} 
-                for msg in messages]
+        return result[0] if result else None
     
-    def clear_old_conversations(self, days_old: int = 30):
-        """Limpia conversaciones antiguas"""
+    def save_assistant_config(self, assistant_id: str, vector_store_id: str):
+        """Guarda configuración del asistente"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cutoff_date = datetime.now() - timedelta(days=days_old)
-        
         cursor.execute('''
-            DELETE FROM messages 
-            WHERE chat_id IN (
-                SELECT chat_id FROM conversations 
-                WHERE last_activity < ?
-            )
-        ''', (cutoff_date,))
-        
-        cursor.execute('''
-            DELETE FROM conversations 
-            WHERE last_activity < ?
-        ''', (cutoff_date,))
+            INSERT OR REPLACE INTO assistant_config 
+            (id, assistant_id, vector_store_id, last_updated)
+            VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+        ''', (assistant_id, vector_store_id))
         
         conn.commit()
         conn.close()
 
 class ImprovedWebScraper:
-    """Scraper mejorado para explorar exhaustivamente el sitio web"""
+    """Scraper optimizado para Vector Store"""
     
     def __init__(self, base_url: str):
         self.base_url = base_url
@@ -225,25 +205,21 @@ class ImprovedWebScraper:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
         
-        # Patrones de URLs que probablemente no contengan contenido útil
         self.skip_patterns = [
             r'\.pdf$', r'\.jpg$', r'\.png$', r'\.gif$', r'\.css$', r'\.js$',
             r'\.zip$', r'\.doc$', r'\.docx$', r'\.xls$', r'\.xlsx$',
             r'/wp-admin/', r'/wp-content/', r'/wp-includes/',
-            r'#$',  # Enlaces que solo van a anclas
-            r'\?.*utm_', r'\.xml$', r'\.json$'
+            r'#$', r'\?.*utm_', r'\.xml$', r'\.json$'
         ]
     
     def normalize_url(self, url: str) -> str:
-        """Normaliza la URL eliminando parámetros innecesarios y fragmentos"""
+        """Normaliza la URL"""
         try:
             parsed = urlparse(url)
-            # Eliminar fragmentos (#)
             normalized = urlunparse((
                 parsed.scheme, parsed.netloc, parsed.path, 
                 parsed.params, parsed.query, ''
             ))
-            # Eliminar trailing slash si no es la raíz
             if normalized.endswith('/') and len(normalized) > len(f"{parsed.scheme}://{parsed.netloc}/"):
                 normalized = normalized.rstrip('/')
             return normalized
@@ -251,22 +227,18 @@ class ImprovedWebScraper:
             return url
     
     def is_valid_url(self, url: str) -> bool:
-        """Verifica si la URL es válida para scrapear de forma más exhaustiva"""
+        """Verifica si la URL es válida para scrapear"""
         try:
             parsed = urlparse(url)
             
-            # Debe ser del mismo dominio
             if parsed.netloc != self.domain:
                 return False
             
-            # Normalizar URL
             normalized_url = self.normalize_url(url)
             
-            # No visitar URLs ya procesadas o fallidas
             if normalized_url in self.visited_urls or normalized_url in self.failed_urls:
                 return False
             
-            # Verificar patrones a evitar
             for pattern in self.skip_patterns:
                 if re.search(pattern, url, re.IGNORECASE):
                     return False
@@ -276,14 +248,14 @@ class ImprovedWebScraper:
             return False
     
     def extract_text_content(self, soup: BeautifulSoup, url: str) -> str:
-        """Extrae el contenido de texto de forma más inteligente"""
+        """Extrae contenido de texto optimizado para Vector Store"""
         try:
             # Remover elementos no deseados
             for element in soup(["script", "style", "nav", "footer", "header", "noscript", 
                                "iframe", "object", "embed", "form", "button"]):
                 element.decompose()
             
-            # Intentar encontrar el contenido principal usando varios selectores
+            # Intentar encontrar contenido principal
             main_content_selectors = [
                 'main', 'article', '.content', '#content', '.main-content',
                 '.post-content', '.entry-content', '.page-content',
@@ -292,17 +264,14 @@ class ImprovedWebScraper:
             
             main_content = ""
             
-            # Buscar contenido principal
             for selector in main_content_selectors:
                 elements = soup.select(selector)
                 if elements:
-                    # Tomar el elemento con más texto
                     best_element = max(elements, key=lambda x: len(x.get_text(strip=True)))
                     main_content = best_element.get_text(separator='\n', strip=True)
-                    if len(main_content.strip()) > 200:  # Contenido sustancial
+                    if len(main_content.strip()) > 200:
                         break
             
-            # Si no encontramos contenido principal, usar body completo
             if not main_content or len(main_content.strip()) < 200:
                 main_content = soup.get_text(separator='\n', strip=True)
             
@@ -310,7 +279,7 @@ class ImprovedWebScraper:
             lines = []
             for line in main_content.split('\n'):
                 cleaned_line = line.strip()
-                if cleaned_line and len(cleaned_line) > 2:  # Evitar líneas muy cortas
+                if cleaned_line and len(cleaned_line) > 2:
                     lines.append(cleaned_line)
             
             # Eliminar duplicados consecutivos
@@ -328,7 +297,7 @@ class ImprovedWebScraper:
             return ""
     
     def extract_all_links(self, soup: BeautifulSoup, current_url: str) -> List[str]:
-        """Extrae TODOS los enlaces internos de manera más exhaustiva"""
+        """Extrae todos los enlaces internos"""
         links = set()
         
         try:
@@ -339,25 +308,7 @@ class ImprovedWebScraper:
                 if self.is_valid_url(full_url):
                     links.add(self.normalize_url(full_url))
             
-            # Enlaces en botones o elementos con onclick
-            for element in soup.find_all(['button', 'div', 'span'], onclick=True):
-                onclick = element.get('onclick', '')
-                # Buscar URLs en JavaScript
-                url_matches = re.findall(r'["\']([^"\']*(?:\.html?|\.php|\/[^"\']*)[^"\']*)["\']', onclick)
-                for match in url_matches:
-                    full_url = urljoin(current_url, match)
-                    if self.is_valid_url(full_url):
-                        links.add(self.normalize_url(full_url))
-            
-            # Enlaces en data attributes
-            for element in soup.find_all(attrs={'data-url': True}):
-                data_url = element.get('data-url')
-                full_url = urljoin(current_url, data_url)
-                if self.is_valid_url(full_url):
-                    links.add(self.normalize_url(full_url))
-            
             # Enlaces específicos para sitios educativos
-            # Buscar patrones comunes como /carrera/, /curso/, /programa/
             education_patterns = [
                 r'href=["\']([^"\']*(?:carrera|curso|programa|materia|asignatura)[^"\']*)["\']',
                 r'href=["\']([^"\']*(?:profesorado|tecnicatura|especializacion)[^"\']*)["\']',
@@ -378,7 +329,7 @@ class ImprovedWebScraper:
         return list(links)
     
     def scrape_page(self, url: str) -> Optional[WebContent]:
-        """Scrapea una página individual con mejor manejo de errores"""
+        """Scrapea una página individual"""
         normalized_url = self.normalize_url(url)
         
         try:
@@ -387,10 +338,9 @@ class ImprovedWebScraper:
             response = self.session.get(normalized_url, timeout=20)
             response.raise_for_status()
             
-            # Verificar que sea HTML
             content_type = response.headers.get('content-type', '').lower()
             if 'html' not in content_type:
-                logger.warning(f"Saltando {normalized_url} - no es HTML ({content_type})")
+                logger.warning(f"Saltando {normalized_url} - no es HTML")
                 return None
             
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -401,7 +351,7 @@ class ImprovedWebScraper:
             # Obtener contenido
             content = self.extract_text_content(soup, normalized_url)
             
-            if content and len(content.strip()) > 50:  # Contenido mínimo útil
+            if content and len(content.strip()) > 50:
                 content_hash = hashlib.md5(content.encode()).hexdigest()
                 
                 web_content = WebContent(
@@ -417,18 +367,14 @@ class ImprovedWebScraper:
             else:
                 logger.warning(f"Contenido insuficiente en {normalized_url}")
         
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error HTTP scrapeando {normalized_url}: {e}")
-            self.failed_urls.add(normalized_url)
         except Exception as e:
-            logger.error(f"Error general scrapeando {normalized_url}: {e}")
+            logger.error(f"Error scrapeando {normalized_url}: {e}")
             self.failed_urls.add(normalized_url)
         
         return None
     
     def _extract_title(self, soup: BeautifulSoup, url: str) -> str:
         """Extrae el título de múltiples fuentes"""
-        # Prioridades de títulos
         title_sources = [
             lambda: soup.find('h1'),
             lambda: soup.find('title'),
@@ -450,11 +396,10 @@ class ImprovedWebScraper:
             except:
                 continue
         
-        # Título por defecto basado en URL
         return urlparse(url).path.split('/')[-1] or url
     
     def scrape_website_exhaustive(self, max_pages: int = 100, max_depth: int = 5) -> List[WebContent]:
-        """Scraping exhaustivo con exploración en profundidad"""
+        """Scraping exhaustivo optimizado"""
         content_list = []
         urls_by_depth = {0: [self.base_url]}
         current_depth = 0
@@ -489,7 +434,7 @@ class ImprovedWebScraper:
                     content_list.append(content)
                 
                 # Obtener enlaces para el siguiente nivel
-                if current_depth < max_depth - 1 and len(content_list) < max_pages:
+                if current_depth < max_depth - 1:
                     try:
                         response = self.session.get(normalized_url, timeout=15)
                         soup = BeautifulSoup(response.content, 'html.parser')
@@ -499,609 +444,310 @@ class ImprovedWebScraper:
                             if link not in self.visited_urls:
                                 next_level_urls.add(link)
                         
-                        logger.info(f"🔗 Encontrados {len(new_links)} enlaces en {normalized_url}")
-                        
                     except Exception as e:
                         logger.warning(f"Error obteniendo enlaces de {normalized_url}: {e}")
                 
-                # Pausa respetuosa
-                time.sleep(0.5)
+                time.sleep(0.5)  # Pausa respetuosa
             
             # Preparar siguiente nivel
             if next_level_urls and current_depth < max_depth - 1:
-                urls_by_depth[current_depth + 1] = list(next_level_urls)[:50]  # Limitar URLs por nivel
+                urls_by_depth[current_depth + 1] = list(next_level_urls)[:50]
             
             current_depth += 1
         
-        logger.info(f"✅ Scraping exhaustivo completado:")
-        logger.info(f"   📄 {len(content_list)} páginas con contenido útil")
-        logger.info(f"   🌐 {len(self.visited_urls)} URLs totales visitadas")
-        logger.info(f"   ❌ {len(self.failed_urls)} URLs fallidas")
-        logger.info(f"   📊 Promedio de caracteres por página: {sum(len(c.content) for c in content_list) // max(1, len(content_list))}")
-        
+        logger.info(f"✅ Scraping completado: {len(content_list)} páginas útiles")
         return content_list
 
-class SchoolAssistant:
-    def __init__(self, openai_api_key: str, website_url: str, school_name: str = ""):
-        logger.info("Inicializando SchoolAssistant...")
+class OpenAIAssistantManager:
+    """Maneja OpenAI Assistant + Vector Store"""
+    
+    def __init__(self, openai_api_key: str, assistant_id: str, vector_store_id: str, school_name: str):
         self.client = OpenAI(api_key=openai_api_key)
-        self.website_url = website_url
+        self.assistant_id = assistant_id
+        self.vector_store_id = vector_store_id
         self.school_name = school_name
         self.db_manager = DatabaseManager()
-        self.scraper = ImprovedWebScraper(website_url)
-        self.system_prompt = self._build_system_prompt()
-        self._last_content_update = None
-        logger.info("SchoolAssistant inicializado correctamente")
+        
+        # Verificar que el assistant y vector store existen
+        self._verify_resources()
     
-    def _build_system_prompt(self) -> str:
-        """Construye el prompt del sistema con información del colegio - MEJORADO"""
+    def _verify_resources(self):
+        """Verifica que el assistant y vector store existen"""
         try:
-            content_list = self.db_manager.get_all_content()
-            logger.info(f"Construyendo prompt con {len(content_list)} contenidos actualizados")
+            # Verificar assistant
+            assistant = self.client.beta.assistants.retrieve(self.assistant_id)
+            logger.info(f"✓ Assistant encontrado: {assistant.name}")
             
-            # Organizar contenido por categorías y priorizar carreras
-            knowledge_sections = []
-            career_content = []
-            general_content = []
+            # Verificar vector store
+            vector_store = self.client.beta.vector_stores.retrieve(self.vector_store_id)
+            logger.info(f"✓ Vector Store encontrado: {vector_store.name}")
             
-            for content in content_list:
-                # Priorizar contenido sobre carreras
-                if any(keyword in content.url.lower() or keyword in content.title.lower() 
-                      for keyword in ['carrera', 'profesorado', 'tecnicatura', 'curso', 'programa']):
-                    career_content.append(content)
-                else:
-                    general_content.append(content)
-            
-            # Añadir contenido de carreras primero (más importante)
-            for content in career_content[:10]:  # Más carreras para mayor cobertura
-                section = f"""
-### {content.title}
-URL: {content.url}
-Última actualización: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
-{content.content[:2500]}{'...' if len(content.content) > 2500 else ''}
-"""
-                knowledge_sections.append(section)
-            
-            # Añadir contenido general
-            for content in general_content[:8]:  # Más contenido general
-                section = f"""
-### {content.title}
-Última actualización: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
-{content.content[:1500]}{'...' if len(content.content) > 1500 else ''}
-"""
-                knowledge_sections.append(section)
-            
-            knowledge_base = "\n".join(knowledge_sections)
-            
-            # Marcar cuando se actualizó el contenido
-            self._last_content_update = datetime.now()
+            # Guardar configuración
+            self.db_manager.save_assistant_config(self.assistant_id, self.vector_store_id)
             
         except Exception as e:
-            logger.error(f"Error construyendo prompt: {e}")
-            knowledge_base = "Información del sitio web en proceso de carga..."
-        
-        return f"""Sos un asistente virtual del {self.school_name} y tu nombre es Agustín (por San Agustín). Sos argentino, amable y cordial. Tu objetivo es ayudar a las familias, estudiantes y visitantes de la mejor manera posible.
-
-## TU PERSONALIDAD:
-- **Argentino auténtico**: Hablás natural, usás "vos", "che", y expresiones típicas argentinas sin exagerar
-- **Amable y cercano**: Tratás a todos con calidad, como si fueras un miembro más de la comunidad educativa  
-- **Directo y claro**: Respondés exactamente lo que te preguntan, sin dar información de más
-- **Preguntón cuando es necesario**: Si necesitás aclarar algo para dar una respuesta precisa, preguntás
-- **Experto en carreras**: Conocés perfectamente todas las carreras, profesorados y cursos que ofrece la institución
-- **Memoria de conversación**: Recordás lo que hablamos antes en esta misma conversación
-
-## INFORMACIÓN COMPLETA DEL COLEGIO (Actualizada: {self._last_content_update.strftime('%Y-%m-%d %H:%M') if self._last_content_update else 'N/A'}):
-{knowledge_base}
-
-## CÓMO RESPONDÉS:
-1. **Continuidad**: Recordás lo que hablamos en esta conversación y hacés referencia cuando es relevante
-2. **Saludá cordialmente** solo al inicio de cada conversación nueva
-3. **Escuchá bien** qué te están preguntando específicamente
-4. **Respondé directamente** a la pregunta, sin repetir información ya dada
-5. **Para consultas sobre carreras**: Proporcioná información detallada incluyendo duración, modalidad, requisitos
-6. **Si no tenés la info exacta**, decilo honestamente y ofrecé alternativas
-7. **Preguntá para aclarar** si la consulta no está clara
-8. **Usá un lenguaje natural argentino** pero profesional
-9. **NO repitas** información que ya diste en mensajes anteriores de esta conversación
-
-## EJEMPLOS DE TU FORMA DE HABLAR:
-- Primera interacción: "¡Hola! ¿Cómo andás? Soy Agustín, ¿en qué te puedo ayudar?"
-- Continuando conversación: "Dale, contame más sobre eso" o "¿Hay algo más específico que te interese saber?"
-- Referencias previas: "Como te mencioné recién sobre el Profesorado en Matemática..." 
-- "Mirá, esa información específica no la tengo a mano, pero te puedo conectar con..."
-- "¿Me podrías aclarar si te referís a nivel terciario o secundario?"
-
-## INFORMACIÓN DE CONTACTO:
-- Dirección: Ruta N°1 y Mendoza
-- Teléfonos: (03758) 424899
-- Email: info@institutosuperiorsanagustin.com   
-- Atención: Lunes a Viernes de 7:30 a 12:30hs y de 16:00 a 21hs
-
-## LO QUE NO HACÉS:
-- No tirás parrafadas largas si no te las piden
-- No repetís información que ya diste en esta conversación
-- No inventás datos que no tenés
-- No usás un lenguaje demasiado formal o robótico
-- No saludás en cada mensaje si ya saludaste al inicio
-
-Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. Tratá cada consulta con la importancia que se merece y mantené el hilo de la conversación fluido."""
+            logger.error(f"Error verificando recursos: {e}")
+            raise
     
-    def update_content_exhaustive(self):
-        """Actualización exhaustiva del contenido del sitio web - MEJORADA"""
-        logger.info("🔄 Iniciando actualización exhaustiva de contenido...")
-        
+    def create_document_file(self, content: WebContent) -> str:
+        """Crea un archivo de documento para el vector store"""
         try:
-            # Crear nuevo scraper para evitar URLs en cache
-            self.scraper = ImprovedWebScraper(self.website_url)
+            # Crear contenido estructurado para mejor búsqueda
+            document_content = f"""Título: {content.title}
+URL: {content.url}
+Última actualización: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
+Institución: {self.school_name}
+
+CONTENIDO:
+{content.content}
+
+---
+Este documento contiene información oficial de {self.school_name}.
+Fuente: {content.url}
+Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
+"""
             
-            # Usar el scraper mejorado
-            new_content = self.scraper.scrape_website_exhaustive(
-                max_pages=80,  # Aumentado para capturar más contenido
-                max_depth=5   # 5 niveles de profundidad
+            # Crear archivo temporal
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as temp_file:
+                temp_file.write(document_content)
+                temp_file_path = temp_file.name
+            
+            # Subir archivo a OpenAI
+            with open(temp_file_path, 'rb') as f:
+                file_response = self.client.files.create(
+                    file=f,
+                    purpose='assistants'
+                )
+            
+            # Limpiar archivo temporal
+            os.unlink(temp_file_path)
+            
+            logger.info(f"✓ Archivo creado: {file_response.id} para {content.url}")
+            return file_response.id
+            
+        except Exception as e:
+            logger.error(f"Error creando archivo para {content.url}: {e}")
+            raise
+    
+    def update_vector_store_content(self, content_list: List[WebContent]):
+        """Actualiza el vector store con nuevo contenido"""
+        try:
+            logger.info(f"🔄 Actualizando vector store con {len(content_list)} documentos...")
+            
+            # Obtener archivos actuales en el vector store
+            current_files = self.client.beta.vector_stores.files.list(
+                vector_store_id=self.vector_store_id
             )
+            current_file_ids = [f.id for f in current_files.data]
             
-            existing_content = {c.url: c for c in self.db_manager.get_all_content()}
+            # Obtener tracking actual
+            tracking_data = {t['url']: t for t in self.db_manager.get_content_tracking()}
             
+            new_files = []
             updated_count = 0
             new_count = 0
             
-            for content in new_content:
-                if content.url not in existing_content:
-                    # Contenido completamente nuevo
-                    self.db_manager.save_web_content(content)
-                    new_count += 1
-                elif existing_content[content.url].content_hash != content.content_hash:
-                    # Contenido actualizado
-                    self.db_manager.save_web_content(content)
-                    updated_count += 1
-            
-            total_changes = updated_count + new_count
-            
-            # SIEMPRE regenerar el system_prompt después de actualizar contenido
-            if total_changes > 0 or len(new_content) > 0:
-                logger.info("🔄 Regenerando system prompt con contenido actualizado...")
-                self.system_prompt = self._build_system_prompt()
+            for content in content_list:
+                should_update = False
                 
-                logger.info(f"✅ Contenido actualizado:")
-                logger.info(f"   🆕 {new_count} páginas nuevas")
-                logger.info(f"   🔄 {updated_count} páginas modificadas") 
-                logger.info(f"   📊 Total de páginas procesadas: {len(new_content)}")
-                logger.info(f"   📊 Total de cambios: {total_changes}")
+                if content.url not in tracking_data:
+                    # Contenido completamente nuevo
+                    should_update = True
+                    new_count += 1
+                elif tracking_data[content.url]['content_hash'] != content.content_hash:
+                    # Contenido modificado
+                    should_update = True
+                    updated_count += 1
+                    
+                    # Eliminar archivo anterior si existe
+                    old_file_id = tracking_data[content.url].get('file_id')
+                    if old_file_id and old_file_id in current_file_ids:
+                        try:
+                            self.client.beta.vector_stores.files.delete(
+                                vector_store_id=self.vector_store_id,
+                                file_id=old_file_id
+                            )
+                            self.client.files.delete(old_file_id)
+                            logger.info(f"🗑️ Archivo anterior eliminado: {old_file_id}")
+                        except Exception as e:
+                            logger.warning(f"Error eliminando archivo anterior: {e}")
+                
+                if should_update:
+                    # Crear nuevo archivo
+                    file_id = self.create_document_file(content)
+                    new_files.append(file_id)
+                    
+                    # Actualizar tracking
+                    self.db_manager.save_content_tracking(content, file_id)
+            
+            # Añadir archivos nuevos al vector store
+            if new_files:
+                logger.info(f"📤 Subiendo {len(new_files)} archivos al vector store...")
+                
+                batch_response = self.client.beta.vector_stores.file_batches.create(
+                    vector_store_id=self.vector_store_id,
+                    file_ids=new_files
+                )
+                
+                # Esperar a que se procesen
+                logger.info("⏳ Esperando procesamiento de archivos...")
+                while batch_response.status in ['in_progress', 'cancelling']:
+                    time.sleep(2)
+                    batch_response = self.client.beta.vector_stores.file_batches.retrieve(
+                        vector_store_id=self.vector_store_id,
+                        batch_id=batch_response.id
+                    )
+                
+                if batch_response.status == 'completed':
+                    logger.info(f"✅ Vector Store actualizado exitosamente!")
+                    logger.info(f"   🆕 {new_count} documentos nuevos")
+                    logger.info(f"   🔄 {updated_count} documentos actualizados")
+                else:
+                    logger.error(f"❌ Error en procesamiento: {batch_response.status}")
             else:
-                logger.info("ℹ️  No hay cambios nuevos en el contenido, pero se verificó toda la información")
-                # Aún así regeneramos el prompt para asegurar que esté actualizado
-                self.system_prompt = self._build_system_prompt()
+                logger.info("ℹ️ No hay cambios que actualizar")
+            
+            return {"new": new_count, "updated": updated_count, "total": len(new_files)}
             
         except Exception as e:
-            logger.error(f"❌ Error en actualización exhaustiva: {e}")
+            logger.error(f"Error actualizando vector store: {e}")
             raise
     
-    # Mantener compatibilidad con método anterior
-    def update_content(self):
-        """Método para compatibilidad - llama al exhaustivo"""
-        self.update_content_exhaustive()
-    
-    def get_response(self, chat_id: str, user_message: str, user_id: str = None) -> str:
-        """Genera una respuesta para el usuario usando GPT-4 - MEJORADO PARA HILO DE CONVERSACIÓN"""
+    def get_response(self, user_message: str, external_id: str = None) -> Dict:
+        """Obtiene respuesta del assistant usando thread persistente"""
         try:
-            # Crear conversación si no existe
-            self.db_manager.create_conversation(chat_id, user_id)
+            thread_id = None
             
-            # Obtener historial COMPLETO de la conversación
-            history = self.db_manager.get_conversation_history(chat_id, limit=30)
+            # Si hay external_id, buscar thread existente
+            if external_id:
+                thread_id = self.db_manager.get_thread_id(external_id)
             
-            # Construir mensajes para OpenAI
-            messages = [{"role": "system", "content": self.system_prompt}]
+            # Crear thread si no existe
+            if not thread_id:
+                thread = self.client.beta.threads.create()
+                thread_id = thread.id
+                logger.info(f"🆕 Nuevo thread creado: {thread_id}")
+                
+                # Guardar mapeo si hay external_id
+                if external_id:
+                    self.db_manager.save_thread_mapping(external_id, thread_id)
+            else:
+                logger.info(f"🔄 Usando thread existente: {thread_id}")
             
-            # IMPORTANTE: Añadir TODO el historial para mantener contexto
-            for msg in history:
-                messages.append({"role": msg["role"], "content": msg["content"]})
-            
-            # Añadir mensaje actual del usuario
-            messages.append({"role": "user", "content": user_message})
-            
-            # Debug: log del contexto
-            logger.info(f"Conversación {chat_id}: {len(history)} mensajes previos + mensaje actual")
-            
-            # Llamada a OpenAI con parámetros optimizados para conversación fluida
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                max_tokens=600,  # Más tokens para respuestas completas
-                temperature=0.1,  # Más consistente pero natural
-                presence_penalty=0.3,  # Evita repetición fuerte
-                frequency_penalty=0.2   # Promueve variedad
+            # Añadir mensaje del usuario
+            self.client.beta.threads.messages.create(
+                thread_id=thread_id,
+                role="user",
+                content=user_message
             )
             
-            assistant_response = response.choices[0].message.content
+            # Ejecutar assistant
+            run = self.client.beta.threads.runs.create(
+                thread_id=thread_id,
+                assistant_id=self.assistant_id
+            )
             
-            # Guardar SOLO el mensaje nuevo (no repetir historial)
-            self.db_manager.save_message(chat_id, "user", user_message)
-            self.db_manager.save_message(chat_id, "assistant", assistant_response)
+            # Esperar respuesta
+            max_wait_time = 60  # 60 segundos máximo
+            wait_time = 0
             
-            logger.info(f"Respuesta generada para {chat_id}: {assistant_response[:100]}...")
+            while run.status in ['queued', 'in_progress', 'cancelling'] and wait_time < max_wait_time:
+                time.sleep(1)
+                wait_time += 1
+                run = self.client.beta.threads.runs.retrieve(
+                    thread_id=thread_id,
+                    run_id=run.id
+                )
             
-            return assistant_response
+            if run.status == 'completed':
+                # Obtener mensajes
+                messages = self.client.beta.threads.messages.list(
+                    thread_id=thread_id,
+                    order='desc',
+                    limit=1
+                )
+                
+                if messages.data:
+                    response_content = messages.data[0].content[0].text.value
+                    
+                    return {
+                        "response": response_content,
+                        "thread_id": thread_id,
+                        "success": True
+                    }
             
-        except Exception as e:
-            logger.error(f"Error generando respuesta: {e}")
-            return "Uy, disculpá, tengo un problemita técnico. ¿Podés intentar de nuevo en un ratito? Si sigue sin andar, mejor llamá directamente al colegio."
-
-    def get_conversation_summary(self, chat_id: str) -> str:
-        """Obtiene un resumen de la conversación actual"""
-        try:
-            history = self.db_manager.get_conversation_history(chat_id, limit=10)
-            if not history:
-                return "Conversación nueva"
-            
-            topics = []
-            for msg in history:
-                if msg["role"] == "user" and len(msg["content"]) > 10:
-                    topics.append(msg["content"][:50])
-            
-            return f"Temas consultados: {', '.join(topics[:3])}"
-        except:
-            return "Conversación activa"
-
-# API REST para el widget
-app = Flask(__name__)
-CORS(app)
-
-# ======== INICIALIZACIÓN AUTOMÁTICA ========
-assistant = None
-
-def init_assistant():
-    """Inicializa el asistente"""
-    global assistant
-    
-    try:
-        logger.info("🚀 Inicializando Agustín, tu asistente del colegio...")
-        
-        school_name = SCHOOL_NAME or "Colegio"
-        
-        logger.info(f"Configuración:")
-        logger.info(f"- URL: {WEBSITE_URL}")
-        logger.info(f"- Escuela: {school_name}")
-        logger.info(f"- OpenAI API: {'✓ Configurada' if OPENAI_API_KEY else '✗ Falta'}")
-        
-        assistant = SchoolAssistant(OPENAI_API_KEY, WEBSITE_URL, school_name)
-        
-        # Realizar scraping exhaustivo inicial
-        try:
-            logger.info("Realizando scraping exhaustivo inicial...")
-            assistant.update_content_exhaustive()
-            logger.info("✓ Sistema completamente listo")
-        except Exception as e:
-            logger.warning(f"Scraping inicial falló, continuando: {e}")
-        
-        return True
-    except Exception as e:
-        logger.error(f"Error fatal inicializando asistente: {e}")
-        return False
-
-# Intentar inicializar inmediatamente
-try:
-    success = init_assistant()
-    if not success:
-        logger.error("Inicialización falló")
-except Exception as e:
-    logger.error(f"Error en inicialización automática: {e}")
-
-# ======== ENDPOINTS MEJORADOS ========
-@app.route('/api/webhook/website', methods=['POST'])
-def webhook_chat():
-    """Endpoint compatible con el formato del widget - MEJORADO"""
-    global assistant
-    
-    if not assistant:
-        logger.error("Assistant no inicializado - intentando reinicializar...")
-        if not init_assistant():
-            return jsonify({"text": "El asistente no está disponible en este momento. Por favor intenta más tarde."}), 500
-    
-    try:
-        data = request.json
-        logger.info(f"Received data: {data}")
-        
-        message_body = data.get('body', '').strip()
-        external_id = data.get('externalId', f"web_{int(time.time())}")
-        
-        if not message_body:
-            return jsonify({"text": "Por favor escribí tu consulta."}), 400
-        
-        # Generar respuesta manteniendo el hilo de conversación
-        response = assistant.get_response(external_id, message_body, external_id)
-        
-        logger.info(f"Generated response for {external_id}: {response[:100]}...")
-        
-        return jsonify({
-            "text": response,
-            "type": "text",
-            "conversation_id": external_id,
-            "timestamp": datetime.now().isoformat()
-        })
-    
-    except Exception as e:
-        logger.error(f"Error en webhook endpoint: {e}")
-        return jsonify({"text": "Disculpá, tuve un problemita técnico. Intentá de nuevo en un ratito."}), 500
-
-@app.route('/api/chat', methods=['POST'])
-def chat():
-    """Endpoint alternativo para compatibilidad"""
-    return webhook_chat()
-
-@app.route('/api/conversation/<chat_id>/history', methods=['GET'])
-def get_conversation_history(chat_id):
-    """Endpoint para obtener historial de conversación"""
-    global assistant
-    
-    if not assistant:
-        return jsonify({"error": "Assistant not initialized"}), 500
-    
-    try:
-        history = assistant.db_manager.get_conversation_history(chat_id, limit=50)
-        summary = assistant.get_conversation_summary(chat_id)
-        
-        return jsonify({
-            "chat_id": chat_id,
-            "summary": summary,
-            "message_count": len(history),
-            "messages": history
-        })
-    except Exception as e:
-        logger.error(f"Error obteniendo historial: {e}")
-        return jsonify({"error": "Error retrieving history"}), 500
-
-@app.route('/api/conversation/<chat_id>/clear', methods=['POST'])
-def clear_conversation(chat_id):
-    """Endpoint para limpiar una conversación específica"""
-    global assistant
-    
-    if not assistant:
-        return jsonify({"error": "Assistant not initialized"}), 500
-    
-    try:
-        conn = sqlite3.connect(assistant.db_manager.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM messages WHERE chat_id = ?', (chat_id,))
-        cursor.execute('DELETE FROM conversations WHERE chat_id = ?', (chat_id,))
-        
-        conn.commit()
-        conn.close()
-        
-        return jsonify({"message": f"Conversación {chat_id} eliminada"})
-    except Exception as e:
-        logger.error(f"Error limpiando conversación: {e}")
-        return jsonify({"error": "Error clearing conversation"}), 500
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    """Endpoint de salud - MEJORADO"""
-    global assistant
-    
-    status_info = {
-        "status": "ok" if assistant else "error",
-        "timestamp": datetime.now().isoformat(),
-        "assistant_initialized": assistant is not None,
-        "environment": {
-            "openai_api_key": "configured" if OPENAI_API_KEY else "missing",
-            "website_url": "configured" if WEBSITE_URL else "missing",
-            "school_name": "configured" if SCHOOL_NAME else "using_default"
-        }
-    }
-    
-    if assistant:
-        try:
-            content_list = assistant.db_manager.get_all_content()
-            status_info["content_pages"] = len(content_list)
-            status_info["content_last_update"] = assistant._last_content_update.isoformat() if assistant._last_content_update else None
-            status_info["scraper_stats"] = {
-                "visited_urls": len(assistant.scraper.visited_urls),
-                "failed_urls": len(assistant.scraper.failed_urls)
-            }
-            
-            # Estadísticas de conversaciones
-            conn = sqlite3.connect(assistant.db_manager.db_path)
-            cursor = conn.cursor()
-            cursor.execute('SELECT COUNT(*) FROM conversations')
-            total_conversations = cursor.fetchone()[0]
-            cursor.execute('SELECT COUNT(*) FROM messages')
-            total_messages = cursor.fetchone()[0]
-            conn.close()
-            
-            status_info["conversation_stats"] = {
-                "total_conversations": total_conversations,
-                "total_messages": total_messages
+            logger.error(f"Run falló con status: {run.status}")
+            return {
+                "response": "Disculpá, tuve un problema técnico. Intentá de nuevo en un ratito.",
+                "thread_id": thread_id,
+                "success": False
             }
             
         except Exception as e:
-            status_info["content_pages"] = "error"
-            status_info["error"] = str(e)
-    
-    return jsonify(status_info)
-
-@app.route('/api/update-content', methods=['POST'])
-def update_content():
-    """Endpoint para actualizar contenido manualmente (ahora exhaustivo) - MEJORADO"""
-    global assistant
-    
-    if not assistant:
-        if not init_assistant():
-            return jsonify({"error": "Asistente no inicializado"}), 500
-    
-    try:
-        logger.info("🔄 Actualización manual de contenido solicitada")
-        
-        # Forzar actualización exhaustiva
-        assistant.update_content_exhaustive()
-        
-        # Obtener estadísticas actualizadas
-        content_list = assistant.db_manager.get_all_content()
-        career_pages = [c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
-                      for keyword in ['carrera', 'profesorado', 'tecnicatura', 'curso', 'programa'])]
-        
-        return jsonify({
-            "message": "Contenido actualizado exhaustivamente",
-            "timestamp": datetime.now().isoformat(),
-            "stats": {
-                "total_pages": len(content_list),
-                "career_pages": len(career_pages),
-                "last_update": assistant._last_content_update.isoformat() if assistant._last_content_update else None,
-                "visited_urls": len(assistant.scraper.visited_urls),
-                "failed_urls": len(assistant.scraper.failed_urls)
+            logger.error(f"Error obteniendo respuesta: {e}")
+            return {
+                "response": "Uy, disculpá, tengo un problemita técnico. ¿Podés intentar de nuevo?",
+                "thread_id": thread_id,
+                "success": False
             }
-        })
-    except Exception as e:
-        logger.error(f"Error actualizando contenido: {e}")
-        return jsonify({"error": f"Error actualizando contenido: {str(e)}"}), 500
 
-@app.route('/api/reinit', methods=['POST'])
-def reinit():
-    """Endpoint para reinicializar el asistente - MEJORADO"""
-    global assistant
-    try:
-        logger.info("🔄 Reinicialización manual solicitada")
-        assistant = None
-        success = init_assistant()
-        if success:
-            return jsonify({
-                "message": "Asistente reinicializado correctamente",
-                "timestamp": datetime.now().isoformat(),
-                "content_pages": len(assistant.db_manager.get_all_content()) if assistant else 0
-            })
-        else:
-            return jsonify({"error": "Error reinicializando asistente"}), 500
-    except Exception as e:
-        logger.error(f"Error reinicializando: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/conversations', methods=['GET'])
-def get_all_conversations():
-    """Endpoint para obtener todas las conversaciones"""
-    global assistant
+class SchoolAssistantWithVectorStore:
+    """Sistema principal que combina scraping + OpenAI Assistant"""
     
-    if not assistant:
-        return jsonify({"error": "Assistant not initialized"}), 500
+    def __init__(self, website_url: str, school_name: str):
+        self.website_url = website_url
+        self.school_name = school_name
+        self.scraper = ImprovedWebScraper(website_url)
+        self.assistant_manager = OpenAIAssistantManager(
+            OPENAI_API_KEY, OPENAI_ASSISTANT_ID, OPENAI_VECTOR_STORE_ID, school_name
+        )
+        self.last_update = None
+        logger.info("🎓 School Assistant con Vector Store inicializado")
     
-    try:
-        conn = sqlite3.connect(assistant.db_manager.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT c.chat_id, c.created_at, c.last_activity,
-                   COUNT(m.id) as message_count
-            FROM conversations c
-            LEFT JOIN messages m ON c.chat_id = m.chat_id
-            GROUP BY c.chat_id
-            ORDER BY c.last_activity DESC
-            LIMIT 50
-        ''')
-        
-        conversations = []
-        for row in cursor.fetchall():
-            conversations.append({
-                "chat_id": row[0],
-                "created_at": row[1],
-                "last_activity": row[2],
-                "message_count": row[3]
-            })
-        
-        conn.close()
-        
-        return jsonify({
-            "conversations": conversations,
-            "total": len(conversations)
-        })
-    except Exception as e:
-        logger.error(f"Error obteniendo conversaciones: {e}")
-        return jsonify({"error": "Error retrieving conversations"}), 500
-
-@app.route("/chat.js")
-def serve_chat():
-    return send_from_directory("static", "chat.js", mimetype="application/javascript")
-
-@app.route('/')
-def home():
-    """Página de inicio básica - MEJORADA"""
-    global assistant
-    
-    stats = {}
-    if assistant:
+    def update_knowledge_base(self):
+        """Actualiza la base de conocimiento completa"""
         try:
-            content_list = assistant.db_manager.get_all_content()
-            stats = {
-                "content_pages": len(content_list),
-                "last_update": assistant._last_content_update.isoformat() if assistant._last_content_update else None,
-                "visited_urls": len(assistant.scraper.visited_urls),
-                "failed_urls": len(assistant.scraper.failed_urls)
+            logger.info("🔄 Iniciando actualización de base de conocimiento...")
+            
+            # Scraping exhaustivo
+            content_list = self.scraper.scrape_website_exhaustive(max_pages=100, max_depth=5)
+            
+            if not content_list:
+                logger.warning("⚠️ No se obtuvo contenido del scraping")
+                return {"error": "No content scraped"}
+            
+            # Actualizar vector store
+            result = self.assistant_manager.update_vector_store_content(content_list)
+            
+            self.last_update = datetime.now()
+            
+            logger.info("✅ Base de conocimiento actualizada exitosamente")
+            return {
+                "success": True,
+                "timestamp": self.last_update.isoformat(),
+                "pages_scraped": len(content_list),
+                "files_new": result["new"],
+                "files_updated": result["updated"]
             }
-        except:
-            stats = {"error": "Error obteniendo estadísticas"}
-    
-    return jsonify({
-        "message": "Agustín - Asistente del Colegio (Versión Mejorada con Hilo de Conversación)",
-        "status": "running",
-        "features": [
-            "Scraping exhaustivo mejorado", 
-            "Exploración en profundidad", 
-            "Detección inteligente de carreras",
-            "Hilo de conversación fluida",
-            "Actualización automática de contenido",
-            "Memoria de conversación persistente"
-        ],
-        "endpoints": {
-            "chat": "/api/chat",
-            "webhook": "/api/webhook/website", 
-            "health": "/api/health",
-            "update": "/api/update-content",
-            "reinit": "/api/reinit",
-            "conversations": "/api/conversations",
-            "history": "/api/conversation/<chat_id>/history",
-            "clear": "/api/conversation/<chat_id>/clear"
-        },
-        "stats": stats
-    })
-
-# ======== TAREAS PROGRAMADAS ========
-def scheduled_update():
-    """Actualización programada del contenido"""
-    global assistant
-    if assistant:
-        try:
-            logger.info("🕐 Ejecutando actualización programada...")
-            assistant.update_content_exhaustive()
-            # Limpiar conversaciones muy antiguas
-            assistant.db_manager.clear_old_conversations(days_old=30)
-            logger.info("✅ Actualización programada completada")
+            
         except Exception as e:
-            logger.error(f"Error en actualización programada: {e}")
-
-# Programar actualizaciones cada 6 horas
-schedule.every(6).hours.do(scheduled_update)
-
-def run_scheduled_tasks():
-    """Ejecutar tareas programadas en un hilo separado"""
-    while True:
-        schedule.run_pending()
-        time.sleep(60)  # Verificar cada minuto
-
-# Iniciar tareas programadas en background
-import threading
-scheduler_thread = threading.Thread(target=run_scheduled_tasks, daemon=True)
-scheduler_thread.start()
-
-if __name__ == "__main__":
-    try:
-        print("🌐 Servidor listo en http://localhost:5000")
-        print("📱 API disponible en /api/chat")
-        print("🏥 Health check en /api/health")
-        print("🔄 Scraping mejorado y exhaustivo activado")
-        print("💬 Sistema de conversación fluida activado")
-        print("⏰ Actualizaciones automáticas cada 6 horas")
-        
-        app.run(host='0.0.0.0', port=5000, debug=False)
-        
-    except Exception as e:
-        logger.error(f"Error fatal al inicializar servidor: {e}")
-        print(f"❌ Error al inicializar: {e}")
-        print("📋 Verifica que tu archivo .env tenga las variables correctas:")
+            logger.error(f"Error actualizando base de conocimiento: {e}")
+            return {"error": str(e)}
+    
+    def get_response(self, user_message: str, external_id: str = None) -> Dict:
+        """Obtiene respuesta del assistant"""
+        return self.assistant_manager.get_response(user_message, external_id)
+    
+    def get_stats(self) -> Dict:
+        """Obtiene estadísticas del sistema"""
+        try:
+            tracking_data = self.assistant_manager.db_manager.get_content_tracking()
+            
+            # Estadísticas del vector store
+            vector_store = self.assistant_manager.client.beta.vector_stores.retrieve(
+                self.assistant_manager.vector_store_id
+            )
+            
+            return {
+                "pages_tracked": len(tracking_data),
+                "vector_
