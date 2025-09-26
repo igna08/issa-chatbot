@@ -121,7 +121,7 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute('SELECT url, title, content, content_hash, last_updated FROM web_content')
+        cursor.execute('SELECT url, title, content, content_hash, last_updated FROM web_content ORDER BY last_updated DESC')
         rows = cursor.fetchall()
         
         conn.close()
@@ -169,8 +169,8 @@ class DatabaseManager:
         conn.commit()
         conn.close()
     
-    def get_conversation_history(self, chat_id: str, limit: int = 10) -> List[Dict]:
-        """Obtiene el historial de una conversación"""
+    def get_conversation_history(self, chat_id: str, limit: int = 20) -> List[Dict]:
+        """Obtiene el historial de una conversación - CORREGIDO"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
@@ -178,16 +178,39 @@ class DatabaseManager:
             SELECT role, content, timestamp 
             FROM messages 
             WHERE chat_id = ? 
-            ORDER BY timestamp DESC 
+            ORDER BY timestamp ASC
             LIMIT ?
         ''', (chat_id, limit))
         
         messages = cursor.fetchall()
         conn.close()
         
-        # Revertir orden para tener cronológico
+        # Devolver en orden cronológico (ya ordenado ASC en la query)
         return [{"role": msg[0], "content": msg[1], "timestamp": msg[2]} 
-                for msg in reversed(messages)]
+                for msg in messages]
+    
+    def clear_old_conversations(self, days_old: int = 30):
+        """Limpia conversaciones antiguas"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cutoff_date = datetime.now() - timedelta(days=days_old)
+        
+        cursor.execute('''
+            DELETE FROM messages 
+            WHERE chat_id IN (
+                SELECT chat_id FROM conversations 
+                WHERE last_activity < ?
+            )
+        ''', (cutoff_date,))
+        
+        cursor.execute('''
+            DELETE FROM conversations 
+            WHERE last_activity < ?
+        ''', (cutoff_date,))
+        
+        conn.commit()
+        conn.close()
 
 class ImprovedWebScraper:
     """Scraper mejorado para explorar exhaustivamente el sitio web"""
@@ -505,15 +528,16 @@ class SchoolAssistant:
         self.website_url = website_url
         self.school_name = school_name
         self.db_manager = DatabaseManager()
-        self.scraper = ImprovedWebScraper(website_url)  # Usar scraper mejorado
+        self.scraper = ImprovedWebScraper(website_url)
         self.system_prompt = self._build_system_prompt()
+        self._last_content_update = None
         logger.info("SchoolAssistant inicializado correctamente")
     
     def _build_system_prompt(self) -> str:
-        """Construye el prompt del sistema con información del colegio"""
+        """Construye el prompt del sistema con información del colegio - MEJORADO"""
         try:
             content_list = self.db_manager.get_all_content()
-            logger.info(f"Construyendo prompt con {len(content_list)} contenidos")
+            logger.info(f"Construyendo prompt con {len(content_list)} contenidos actualizados")
             
             # Organizar contenido por categorías y priorizar carreras
             knowledge_sections = []
@@ -529,23 +553,29 @@ class SchoolAssistant:
                     general_content.append(content)
             
             # Añadir contenido de carreras primero (más importante)
-            for content in career_content[:8]:  # Máximo 8 carreras
+            for content in career_content[:10]:  # Más carreras para mayor cobertura
                 section = f"""
 ### {content.title}
 URL: {content.url}
-{content.content[:2000]}{'...' if len(content.content) > 2000 else ''}
+Última actualización: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
+{content.content[:2500]}{'...' if len(content.content) > 2500 else ''}
 """
                 knowledge_sections.append(section)
             
             # Añadir contenido general
-            for content in general_content[:7]:  # 7 páginas generales
+            for content in general_content[:8]:  # Más contenido general
                 section = f"""
 ### {content.title}
-{content.content[:1200]}{'...' if len(content.content) > 1200 else ''}
+Última actualización: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
+{content.content[:1500]}{'...' if len(content.content) > 1500 else ''}
 """
                 knowledge_sections.append(section)
             
             knowledge_base = "\n".join(knowledge_sections)
+            
+            # Marcar cuando se actualizó el contenido
+            self._last_content_update = datetime.now()
+            
         except Exception as e:
             logger.error(f"Error construyendo prompt: {e}")
             knowledge_base = "Información del sitio web en proceso de carga..."
@@ -554,27 +584,30 @@ URL: {content.url}
 
 ## TU PERSONALIDAD:
 - **Argentino auténtico**: Hablás natural, usás "vos", "che", y expresiones típicas argentinas sin exagerar
-- **Amable y cercano**: Tratás a todos con calidez, como si fueras un miembro más de la comunidad educativa  
+- **Amable y cercano**: Tratás a todos con calidad, como si fueras un miembro más de la comunidad educativa  
 - **Directo y claro**: Respondés exactamente lo que te preguntan, sin dar información de más
 - **Preguntón cuando es necesario**: Si necesitás aclarar algo para dar una respuesta precisa, preguntás
 - **Experto en carreras**: Conocés perfectamente todas las carreras, profesorados y cursos que ofrece la institución
+- **Memoria de conversación**: Recordás lo que hablamos antes en esta misma conversación
 
-## INFORMACIÓN COMPLETA DEL COLEGIO:
+## INFORMACIÓN COMPLETA DEL COLEGIO (Actualizada: {self._last_content_update.strftime('%Y-%m-%d %H:%M') if self._last_content_update else 'N/A'}):
 {knowledge_base}
 
 ## CÓMO RESPONDÉS:
-1. **Saludá cordialmente** al inicio de cada conversación
-2. **Escuchá bien** qué te están preguntando específicamente
-3. **Respondé directamente** a la pregunta, sin dar vueltas
-4. **Para consultas sobre carreras**: Proporcioná información detallada incluyendo duración, modalidad, requisitos
-5. **Si no tenés la info exacta**, decilo honestamente y ofrecé alternativas
-6. **Preguntá para aclarar** si la consulta no está clara
-7. **Usá un lenguaje natural argentino** pero profesional
+1. **Continuidad**: Recordás lo que hablamos en esta conversación y hacés referencia cuando es relevante
+2. **Saludá cordialmente** solo al inicio de cada conversación nueva
+3. **Escuchá bien** qué te están preguntando específicamente
+4. **Respondé directamente** a la pregunta, sin repetir información ya dada
+5. **Para consultas sobre carreras**: Proporcioná información detallada incluyendo duración, modalidad, requisitos
+6. **Si no tenés la info exacta**, decilo honestamente y ofrecé alternativas
+7. **Preguntá para aclarar** si la consulta no está clara
+8. **Usá un lenguaje natural argentino** pero profesional
+9. **NO repitas** información que ya diste en mensajes anteriores de esta conversación
 
 ## EJEMPLOS DE TU FORMA DE HABLAR:
-- "¡Hola! ¿Cómo andás? Soy Agustín, ¿en qué te puedo ayudar?"
-- "Perfecto, te cuento sobre el Profesorado en Matemática..."
-- "Tenemos varias opciones en el área de educación, ¿te interesa alguna en particular?"
+- Primera interacción: "¡Hola! ¿Cómo andás? Soy Agustín, ¿en qué te puedo ayudar?"
+- Continuando conversación: "Dale, contame más sobre eso" o "¿Hay algo más específico que te interese saber?"
+- Referencias previas: "Como te mencioné recién sobre el Profesorado en Matemática..." 
 - "Mirá, esa información específica no la tengo a mano, pero te puedo conectar con..."
 - "¿Me podrías aclarar si te referís a nivel terciario o secundario?"
 
@@ -586,21 +619,25 @@ URL: {content.url}
 
 ## LO QUE NO HACÉS:
 - No tirás parrafadas largas si no te las piden
-- No repetís información que ya diste
+- No repetís información que ya diste en esta conversación
 - No inventás datos que no tenés
 - No usás un lenguaje demasiado formal o robótico
+- No saludás en cada mensaje si ya saludaste al inicio
 
-Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. Tratá cada consulta con la importancia que se merece."""
+Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. Tratá cada consulta con la importancia que se merece y mantené el hilo de la conversación fluido."""
     
     def update_content_exhaustive(self):
-        """Actualización exhaustiva del contenido del sitio web"""
+        """Actualización exhaustiva del contenido del sitio web - MEJORADA"""
         logger.info("🔄 Iniciando actualización exhaustiva de contenido...")
         
         try:
+            # Crear nuevo scraper para evitar URLs en cache
+            self.scraper = ImprovedWebScraper(self.website_url)
+            
             # Usar el scraper mejorado
             new_content = self.scraper.scrape_website_exhaustive(
-                max_pages=60,  # Aumentado para capturar más contenido
-                max_depth=4   # 4 niveles de profundidad
+                max_pages=80,  # Aumentado para capturar más contenido
+                max_depth=5   # 5 niveles de profundidad
             )
             
             existing_content = {c.url: c for c in self.db_manager.get_all_content()}
@@ -620,14 +657,20 @@ Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. 
             
             total_changes = updated_count + new_count
             
-            if total_changes > 0:
+            # SIEMPRE regenerar el system_prompt después de actualizar contenido
+            if total_changes > 0 or len(new_content) > 0:
+                logger.info("🔄 Regenerando system prompt con contenido actualizado...")
                 self.system_prompt = self._build_system_prompt()
+                
                 logger.info(f"✅ Contenido actualizado:")
                 logger.info(f"   🆕 {new_count} páginas nuevas")
                 logger.info(f"   🔄 {updated_count} páginas modificadas") 
+                logger.info(f"   📊 Total de páginas procesadas: {len(new_content)}")
                 logger.info(f"   📊 Total de cambios: {total_changes}")
             else:
-                logger.info("ℹ️  No hay cambios en el contenido")
+                logger.info("ℹ️  No hay cambios nuevos en el contenido, pero se verificó toda la información")
+                # Aún así regeneramos el prompt para asegurar que esté actualizado
+                self.system_prompt = self._build_system_prompt()
             
         except Exception as e:
             logger.error(f"❌ Error en actualización exhaustiva: {e}")
@@ -639,45 +682,66 @@ Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. 
         self.update_content_exhaustive()
     
     def get_response(self, chat_id: str, user_message: str, user_id: str = None) -> str:
-        """Genera una respuesta para el usuario usando GPT-4"""
+        """Genera una respuesta para el usuario usando GPT-4 - MEJORADO PARA HILO DE CONVERSACIÓN"""
         try:
             # Crear conversación si no existe
             self.db_manager.create_conversation(chat_id, user_id)
             
-            # Obtener historial
-            history = self.db_manager.get_conversation_history(chat_id)
+            # Obtener historial COMPLETO de la conversación
+            history = self.db_manager.get_conversation_history(chat_id, limit=30)
             
             # Construir mensajes para OpenAI
             messages = [{"role": "system", "content": self.system_prompt}]
             
-            # Añadir historial reciente
-            for msg in history[-8:]:  # Últimos 8 mensajes para mantener contexto
+            # IMPORTANTE: Añadir TODO el historial para mantener contexto
+            for msg in history:
                 messages.append({"role": msg["role"], "content": msg["content"]})
             
-            # Añadir mensaje actual
+            # Añadir mensaje actual del usuario
             messages.append({"role": "user", "content": user_message})
             
-            # Llamada a OpenAI
+            # Debug: log del contexto
+            logger.info(f"Conversación {chat_id}: {len(history)} mensajes previos + mensaje actual")
+            
+            # Llamada a OpenAI con parámetros optimizados para conversación fluida
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
-                max_tokens=500,  # Aumentado para respuestas más completas sobre carreras
-                temperature=0.01,  # Más natural y conversacional
-                presence_penalty=0.2,  # Evita repetición
-                frequency_penalty=0.1   # Promueve variedad
+                max_tokens=600,  # Más tokens para respuestas completas
+                temperature=0.1,  # Más consistente pero natural
+                presence_penalty=0.3,  # Evita repetición fuerte
+                frequency_penalty=0.2   # Promueve variedad
             )
             
             assistant_response = response.choices[0].message.content
             
-            # Guardar mensajes
+            # Guardar SOLO el mensaje nuevo (no repetir historial)
             self.db_manager.save_message(chat_id, "user", user_message)
             self.db_manager.save_message(chat_id, "assistant", assistant_response)
+            
+            logger.info(f"Respuesta generada para {chat_id}: {assistant_response[:100]}...")
             
             return assistant_response
             
         except Exception as e:
             logger.error(f"Error generando respuesta: {e}")
             return "Uy, disculpá, tengo un problemita técnico. ¿Podés intentar de nuevo en un ratito? Si sigue sin andar, mejor llamá directamente al colegio."
+
+    def get_conversation_summary(self, chat_id: str) -> str:
+        """Obtiene un resumen de la conversación actual"""
+        try:
+            history = self.db_manager.get_conversation_history(chat_id, limit=10)
+            if not history:
+                return "Conversación nueva"
+            
+            topics = []
+            for msg in history:
+                if msg["role"] == "user" and len(msg["content"]) > 10:
+                    topics.append(msg["content"][:50])
+            
+            return f"Temas consultados: {', '.join(topics[:3])}"
+        except:
+            return "Conversación activa"
 
 # API REST para el widget
 app = Flask(__name__)
@@ -723,10 +787,10 @@ try:
 except Exception as e:
     logger.error(f"Error en inicialización automática: {e}")
 
-# ======== ENDPOINTS ========
+# ======== ENDPOINTS MEJORADOS ========
 @app.route('/api/webhook/website', methods=['POST'])
 def webhook_chat():
-    """Endpoint compatible con el formato del widget"""
+    """Endpoint compatible con el formato del widget - MEJORADO"""
     global assistant
     
     if not assistant:
@@ -738,19 +802,22 @@ def webhook_chat():
         data = request.json
         logger.info(f"Received data: {data}")
         
-        message_body = data.get('body', '')
+        message_body = data.get('body', '').strip()
         external_id = data.get('externalId', f"web_{int(time.time())}")
         
         if not message_body:
             return jsonify({"text": "Por favor escribí tu consulta."}), 400
         
+        # Generar respuesta manteniendo el hilo de conversación
         response = assistant.get_response(external_id, message_body, external_id)
         
-        logger.info(f"Generated response: {response}")
+        logger.info(f"Generated response for {external_id}: {response[:100]}...")
         
         return jsonify({
             "text": response,
-            "type": "text"
+            "type": "text",
+            "conversation_id": external_id,
+            "timestamp": datetime.now().isoformat()
         })
     
     except Exception as e:
@@ -762,9 +829,54 @@ def chat():
     """Endpoint alternativo para compatibilidad"""
     return webhook_chat()
 
+@app.route('/api/conversation/<chat_id>/history', methods=['GET'])
+def get_conversation_history(chat_id):
+    """Endpoint para obtener historial de conversación"""
+    global assistant
+    
+    if not assistant:
+        return jsonify({"error": "Assistant not initialized"}), 500
+    
+    try:
+        history = assistant.db_manager.get_conversation_history(chat_id, limit=50)
+        summary = assistant.get_conversation_summary(chat_id)
+        
+        return jsonify({
+            "chat_id": chat_id,
+            "summary": summary,
+            "message_count": len(history),
+            "messages": history
+        })
+    except Exception as e:
+        logger.error(f"Error obteniendo historial: {e}")
+        return jsonify({"error": "Error retrieving history"}), 500
+
+@app.route('/api/conversation/<chat_id>/clear', methods=['POST'])
+def clear_conversation(chat_id):
+    """Endpoint para limpiar una conversación específica"""
+    global assistant
+    
+    if not assistant:
+        return jsonify({"error": "Assistant not initialized"}), 500
+    
+    try:
+        conn = sqlite3.connect(assistant.db_manager.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('DELETE FROM messages WHERE chat_id = ?', (chat_id,))
+        cursor.execute('DELETE FROM conversations WHERE chat_id = ?', (chat_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({"message": f"Conversación {chat_id} eliminada"})
+    except Exception as e:
+        logger.error(f"Error limpiando conversación: {e}")
+        return jsonify({"error": "Error clearing conversation"}), 500
+
 @app.route('/api/health', methods=['GET'])
 def health():
-    """Endpoint de salud"""
+    """Endpoint de salud - MEJORADO"""
     global assistant
     
     status_info = {
@@ -780,20 +892,37 @@ def health():
     
     if assistant:
         try:
-            content_count = len(assistant.db_manager.get_all_content())
-            status_info["content_pages"] = content_count
+            content_list = assistant.db_manager.get_all_content()
+            status_info["content_pages"] = len(content_list)
+            status_info["content_last_update"] = assistant._last_content_update.isoformat() if assistant._last_content_update else None
             status_info["scraper_stats"] = {
                 "visited_urls": len(assistant.scraper.visited_urls),
                 "failed_urls": len(assistant.scraper.failed_urls)
             }
-        except:
+            
+            # Estadísticas de conversaciones
+            conn = sqlite3.connect(assistant.db_manager.db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM conversations')
+            total_conversations = cursor.fetchone()[0]
+            cursor.execute('SELECT COUNT(*) FROM messages')
+            total_messages = cursor.fetchone()[0]
+            conn.close()
+            
+            status_info["conversation_stats"] = {
+                "total_conversations": total_conversations,
+                "total_messages": total_messages
+            }
+            
+        except Exception as e:
             status_info["content_pages"] = "error"
+            status_info["error"] = str(e)
     
     return jsonify(status_info)
 
 @app.route('/api/update-content', methods=['POST'])
 def update_content():
-    """Endpoint para actualizar contenido manualmente (ahora exhaustivo)"""
+    """Endpoint para actualizar contenido manualmente (ahora exhaustivo) - MEJORADO"""
     global assistant
     
     if not assistant:
@@ -801,26 +930,91 @@ def update_content():
             return jsonify({"error": "Asistente no inicializado"}), 500
     
     try:
+        logger.info("🔄 Actualización manual de contenido solicitada")
+        
+        # Forzar actualización exhaustiva
         assistant.update_content_exhaustive()
-        return jsonify({"message": "Contenido actualizado exhaustivamente"})
+        
+        # Obtener estadísticas actualizadas
+        content_list = assistant.db_manager.get_all_content()
+        career_pages = [c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
+                      for keyword in ['carrera', 'profesorado', 'tecnicatura', 'curso', 'programa'])]
+        
+        return jsonify({
+            "message": "Contenido actualizado exhaustivamente",
+            "timestamp": datetime.now().isoformat(),
+            "stats": {
+                "total_pages": len(content_list),
+                "career_pages": len(career_pages),
+                "last_update": assistant._last_content_update.isoformat() if assistant._last_content_update else None,
+                "visited_urls": len(assistant.scraper.visited_urls),
+                "failed_urls": len(assistant.scraper.failed_urls)
+            }
+        })
     except Exception as e:
         logger.error(f"Error actualizando contenido: {e}")
-        return jsonify({"error": "Error actualizando contenido"}), 500
+        return jsonify({"error": f"Error actualizando contenido: {str(e)}"}), 500
 
 @app.route('/api/reinit', methods=['POST'])
 def reinit():
-    """Endpoint para reinicializar el asistente"""
+    """Endpoint para reinicializar el asistente - MEJORADO"""
     global assistant
     try:
+        logger.info("🔄 Reinicialización manual solicitada")
         assistant = None
         success = init_assistant()
         if success:
-            return jsonify({"message": "Asistente reinicializado correctamente"})
+            return jsonify({
+                "message": "Asistente reinicializado correctamente",
+                "timestamp": datetime.now().isoformat(),
+                "content_pages": len(assistant.db_manager.get_all_content()) if assistant else 0
+            })
         else:
             return jsonify({"error": "Error reinicializando asistente"}), 500
     except Exception as e:
         logger.error(f"Error reinicializando: {e}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/conversations', methods=['GET'])
+def get_all_conversations():
+    """Endpoint para obtener todas las conversaciones"""
+    global assistant
+    
+    if not assistant:
+        return jsonify({"error": "Assistant not initialized"}), 500
+    
+    try:
+        conn = sqlite3.connect(assistant.db_manager.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT c.chat_id, c.created_at, c.last_activity,
+                   COUNT(m.id) as message_count
+            FROM conversations c
+            LEFT JOIN messages m ON c.chat_id = m.chat_id
+            GROUP BY c.chat_id
+            ORDER BY c.last_activity DESC
+            LIMIT 50
+        ''')
+        
+        conversations = []
+        for row in cursor.fetchall():
+            conversations.append({
+                "chat_id": row[0],
+                "created_at": row[1],
+                "last_activity": row[2],
+                "message_count": row[3]
+            })
+        
+        conn.close()
+        
+        return jsonify({
+            "conversations": conversations,
+            "total": len(conversations)
+        })
+    except Exception as e:
+        logger.error(f"Error obteniendo conversaciones: {e}")
+        return jsonify({"error": "Error retrieving conversations"}), 500
 
 @app.route("/chat.js")
 def serve_chat():
@@ -828,18 +1022,73 @@ def serve_chat():
 
 @app.route('/')
 def home():
-    """Página de inicio básica"""
+    """Página de inicio básica - MEJORADA"""
+    global assistant
+    
+    stats = {}
+    if assistant:
+        try:
+            content_list = assistant.db_manager.get_all_content()
+            stats = {
+                "content_pages": len(content_list),
+                "last_update": assistant._last_content_update.isoformat() if assistant._last_content_update else None,
+                "visited_urls": len(assistant.scraper.visited_urls),
+                "failed_urls": len(assistant.scraper.failed_urls)
+            }
+        except:
+            stats = {"error": "Error obteniendo estadísticas"}
+    
     return jsonify({
-        "message": "Agustín - Asistente del Colegio (Versión Mejorada)",
+        "message": "Agustín - Asistente del Colegio (Versión Mejorada con Hilo de Conversación)",
         "status": "running",
-        "features": ["Scraping exhaustivo", "Exploración en profundidad", "Detección inteligente de carreras"],
+        "features": [
+            "Scraping exhaustivo mejorado", 
+            "Exploración en profundidad", 
+            "Detección inteligente de carreras",
+            "Hilo de conversación fluida",
+            "Actualización automática de contenido",
+            "Memoria de conversación persistente"
+        ],
         "endpoints": {
             "chat": "/api/chat",
             "webhook": "/api/webhook/website", 
             "health": "/api/health",
-            "update": "/api/update-content"
-        }
+            "update": "/api/update-content",
+            "reinit": "/api/reinit",
+            "conversations": "/api/conversations",
+            "history": "/api/conversation/<chat_id>/history",
+            "clear": "/api/conversation/<chat_id>/clear"
+        },
+        "stats": stats
     })
+
+# ======== TAREAS PROGRAMADAS ========
+def scheduled_update():
+    """Actualización programada del contenido"""
+    global assistant
+    if assistant:
+        try:
+            logger.info("🕐 Ejecutando actualización programada...")
+            assistant.update_content_exhaustive()
+            # Limpiar conversaciones muy antiguas
+            assistant.db_manager.clear_old_conversations(days_old=30)
+            logger.info("✅ Actualización programada completada")
+        except Exception as e:
+            logger.error(f"Error en actualización programada: {e}")
+
+# Programar actualizaciones cada 6 horas
+schedule.every(6).hours.do(scheduled_update)
+
+def run_scheduled_tasks():
+    """Ejecutar tareas programadas en un hilo separado"""
+    while True:
+        schedule.run_pending()
+        time.sleep(60)  # Verificar cada minuto
+
+# Iniciar tareas programadas en background
+import threading
+scheduler_thread = threading.Thread(target=run_scheduled_tasks, daemon=True)
+scheduler_thread.start()
 
 if __name__ == "__main__":
     try:
@@ -847,6 +1096,8 @@ if __name__ == "__main__":
         print("📱 API disponible en /api/chat")
         print("🏥 Health check en /api/health")
         print("🔄 Scraping mejorado y exhaustivo activado")
+        print("💬 Sistema de conversación fluida activado")
+        print("⏰ Actualizaciones automáticas cada 6 horas")
         
         app.run(host='0.0.0.0', port=5000, debug=False)
         
