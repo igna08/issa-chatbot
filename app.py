@@ -519,21 +519,14 @@ class SchoolAssistant:
             knowledge_sections = []
             career_content = []
             general_content = []
-            all_urls = {}  # Para mapear títulos a URLs
             
             for content in content_list:
-                # Almacenar URL para cada contenido
-                all_urls[content.title.lower()] = content.url
-                
                 # Priorizar contenido sobre carreras
                 if any(keyword in content.url.lower() or keyword in content.title.lower() 
                       for keyword in ['carrera', 'profesorado', 'tecnicatura', 'curso', 'programa']):
                     career_content.append(content)
                 else:
                     general_content.append(content)
-            
-            # Crear índice de enlaces organizados
-            links_index = self._create_links_index(content_list)
             
             # Añadir contenido de carreras primero (más importante)
             for content in career_content[:8]:  # Máximo 8 carreras
@@ -548,31 +541,11 @@ URL: {content.url}
             for content in general_content[:7]:  # 7 páginas generales
                 section = f"""
 ### {content.title}
-URL: {content.url}
 {content.content[:1200]}{'...' if len(content.content) > 1200 else ''}
 """
                 knowledge_sections.append(section)
             
             knowledge_base = "\n".join(knowledge_sections)
-            
-            # Añadir índice completo de enlaces
-            links_section = f"""
-
-## 🔗 ÍNDICE COMPLETO DE ENLACES DISPONIBLES:
-
-### CARRERAS Y PROFESORADOS:
-{links_index['careers']}
-
-### SECUNDARIOS:
-{links_index['secondary']}
-
-### INFORMACIÓN GENERAL:
-{links_index['general']}
-
-### OTROS ENLACES:
-{links_index['others']}
-
-IMPORTANTE: Cuando un usuario pregunte por un enlace específico, SIEMPRE proporcioná la URL completa correspondiente de este índice."""
         except Exception as e:
             logger.error(f"Error construyendo prompt: {e}")
             knowledge_base = "Información del sitio web en proceso de carga..."
@@ -689,7 +662,7 @@ Recordá: cada familia que te habla está buscando el mejor lugar para su hijo. 
                 model="gpt-4o-mini",
                 messages=messages,
                 max_tokens=500,  # Aumentado para respuestas más completas sobre carreras
-                temperature=0.8,  # Más natural y conversacional
+                temperature=0.01,  # Más natural y conversacional
                 presence_penalty=0.2,  # Evita repetición
                 frequency_penalty=0.1   # Promueve variedad
             )
@@ -834,101 +807,6 @@ def update_content():
         logger.error(f"Error actualizando contenido: {e}")
         return jsonify({"error": "Error actualizando contenido"}), 500
 
-@app.route('/api/links', methods=['GET'])
-def get_all_links():
-    """Endpoint para obtener todos los enlaces scrapeados organizados"""
-    global assistant
-    
-    if not assistant:
-        return jsonify({"error": "Asistente no inicializado"}), 500
-    
-    try:
-        content_list = assistant.db_manager.get_all_content()
-        links_index = assistant._create_links_index(content_list)
-        
-        # Crear respuesta estructurada
-        response = {
-            "total_links": len(content_list),
-            "categories": {
-                "careers_and_profesorados": {
-                    "count": len([c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
-                                                               for keyword in ['profesorado', 'carrera'])]),
-                    "links": links_index['careers'].split('\n') if links_index['careers'] != "No disponible" else []
-                },
-                "secondary_education": {
-                    "count": len([c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
-                                                               for keyword in ['secundario', 'maestro', 'gastronomia'])]),
-                    "links": links_index['secondary'].split('\n') if links_index['secondary'] != "No disponible" else []
-                },
-                "general_info": {
-                    "count": len([c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
-                                                               for keyword in ['inscripcion', 'requisito', 'contact', 'about', 'novedades'])]),
-                    "links": links_index['general'].split('\n') if links_index['general'] != "No disponible" else []
-                },
-                "others": {
-                    "count": len(content_list) - len([c for c in content_list if any(keyword in c.url.lower() or keyword in c.title.lower() 
-                                                                                    for keyword in ['profesorado', 'carrera', 'secundario', 'maestro', 'gastronomia', 'inscripcion', 'requisito', 'contact', 'about', 'novedades'])]),
-                    "links": links_index['others'].split('\n') if links_index['others'] != "No disponible" else []
-                }
-            },
-            "all_urls": [{"title": c.title, "url": c.url, "last_updated": c.last_updated.isoformat()} for c in content_list]
-        }
-        
-        return jsonify(response)
-    
-    except Exception as e:
-        logger.error(f"Error obteniendo enlaces: {e}")
-        return jsonify({"error": "Error obteniendo enlaces"}), 500
-
-@app.route('/api/search-link', methods=['POST'])
-def search_link():
-    """Endpoint para buscar un enlace específico por nombre o palabra clave"""
-    global assistant
-    
-    if not assistant:
-        return jsonify({"error": "Asistente no inicializado"}), 500
-    
-    try:
-        data = request.json
-        query = data.get('query', '').lower().strip()
-        
-        if not query:
-            return jsonify({"error": "Consulta vacía"}), 400
-        
-        content_list = assistant.db_manager.get_all_content()
-        matches = []
-        
-        for content in content_list:
-            # Buscar en título y URL
-            if (query in content.title.lower() or 
-                query in content.url.lower() or
-                any(word in content.title.lower() for word in query.split()) or
-                any(word in content.url.lower() for word in query.split())):
-                
-                matches.append({
-                    "title": content.title,
-                    "url": content.url,
-                    "relevance_score": (
-                        content.title.lower().count(query) * 2 +  # Título vale más
-                        content.url.lower().count(query) +
-                        sum(content.title.lower().count(word) for word in query.split()) +
-                        sum(content.url.lower().count(word) for word in query.split())
-                    )
-                })
-        
-        # Ordenar por relevancia
-        matches.sort(key=lambda x: x['relevance_score'], reverse=True)
-        
-        return jsonify({
-            "query": query,
-            "total_matches": len(matches),
-            "matches": matches[:10]  # Top 10 resultados
-        })
-    
-    except Exception as e:
-        logger.error(f"Error buscando enlace: {e}")
-        return jsonify({"error": "Error buscando enlace"}), 500
-
 @app.route('/api/reinit', methods=['POST'])
 def reinit():
     """Endpoint para reinicializar el asistente"""
@@ -954,14 +832,12 @@ def home():
     return jsonify({
         "message": "Agustín - Asistente del Colegio (Versión Mejorada)",
         "status": "running",
-        "features": ["Scraping exhaustivo", "Exploración en profundidad", "Detección inteligente de carreras", "Índice completo de enlaces"],
+        "features": ["Scraping exhaustivo", "Exploración en profundidad", "Detección inteligente de carreras"],
         "endpoints": {
             "chat": "/api/chat",
             "webhook": "/api/webhook/website", 
             "health": "/api/health",
-            "update": "/api/update-content",
-            "links": "/api/links",
-            "search_link": "/api/search-link"
+            "update": "/api/update-content"
         }
     })
 
