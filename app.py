@@ -149,15 +149,6 @@ class DatabaseManager:
             for row in rows
         ]
     
-    def clear_content_tracking(self):
-        """Limpia todo el tracking de contenido"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM web_content_tracking')
-        conn.commit()
-        conn.close()
-        logger.info("Tracking de contenido limpiado")
-    
     def save_thread_mapping(self, external_id: str, thread_id: str):
         """Guarda mapeo de thread para conversaciones"""
         conn = sqlite3.connect(self.db_path)
@@ -413,15 +404,15 @@ class ImprovedWebScraper:
         urls_by_depth = {0: [self.base_url]}
         current_depth = 0
         
-        logger.info(f"Iniciando scraping exhaustivo de: {self.base_url}")
-        logger.info(f"Límites: {max_pages} páginas máximo, {max_depth} niveles de profundidad")
+        logger.info(f"🚀 Iniciando scraping exhaustivo de: {self.base_url}")
+        logger.info(f"📊 Límites: {max_pages} páginas máximo, {max_depth} niveles de profundidad")
         
         while current_depth < max_depth and len(content_list) < max_pages:
             if current_depth not in urls_by_depth or not urls_by_depth[current_depth]:
                 current_depth += 1
                 continue
             
-            logger.info(f"Procesando nivel {current_depth} - {len(urls_by_depth[current_depth])} URLs")
+            logger.info(f"📂 Procesando nivel {current_depth} - {len(urls_by_depth[current_depth])} URLs")
             
             current_level_urls = urls_by_depth[current_depth]
             next_level_urls = set()
@@ -464,7 +455,7 @@ class ImprovedWebScraper:
             
             current_depth += 1
         
-        logger.info(f"Scraping completado: {len(content_list)} páginas útiles")
+        logger.info(f"✅ Scraping completado: {len(content_list)} páginas útiles")
         return content_list
 
 class OpenAIAssistantManager:
@@ -483,12 +474,15 @@ class OpenAIAssistantManager:
     def _verify_resources(self):
         """Verifica que el assistant y vector store existen"""
         try:
-            assistant = self.client.assistants.retrieve(self.assistant_id)
+            # Verificar assistant - usar client.beta.assistants
+            assistant = self.client.beta.assistants.retrieve(self.assistant_id)
             logger.info(f"✓ Assistant encontrado: {assistant.name}")
             
+            # Verificar vector store - usar client.vector_stores (ya no está en beta)
             vector_store = self.client.vector_stores.retrieve(self.vector_store_id)
             logger.info(f"✓ Vector Store encontrado: {vector_store.name}")
             
+            # Guardar configuración
             self.db_manager.save_assistant_config(self.assistant_id, self.vector_store_id)
             
         except Exception as e:
@@ -498,6 +492,7 @@ class OpenAIAssistantManager:
     def create_document_file(self, content: WebContent) -> str:
         """Crea un archivo de documento para el vector store"""
         try:
+            # Crear contenido estructurado para mejor búsqueda
             document_content = f"""Título: {content.title}
 URL: {content.url}
 Última actualización: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
@@ -512,16 +507,19 @@ Fuente: {content.url}
 Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
 """
             
+            # Crear archivo temporal
             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as temp_file:
                 temp_file.write(document_content)
                 temp_file_path = temp_file.name
             
+            # Subir archivo a OpenAI
             with open(temp_file_path, 'rb') as f:
                 file_response = self.client.files.create(
                     file=f,
                     purpose='assistants'
                 )
             
+            # Limpiar archivo temporal
             os.unlink(temp_file_path)
             
             logger.info(f"✓ Archivo creado: {file_response.id} para {content.url}")
@@ -531,129 +529,73 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             logger.error(f"Error creando archivo para {content.url}: {e}")
             raise
     
-    def clean_vector_store(self):
-        """Limpia completamente el Vector Store eliminando todos los archivos"""
+    def update_vector_store_content(self, content_list: List[WebContent]):
+        """Actualiza el vector store con nuevo contenido"""
         try:
-            logger.info("Limpiando Vector Store...")
+            logger.info(f"🔄 Actualizando vector store con {len(content_list)} documentos...")
             
-            # Obtener todos los archivos del vector store
-            files_response = self.client.vector_stores.files.list(
-                vector_store_id=self.vector_store_id,
-                limit=100
-            )
-            
-            deleted_count = 0
-            failed_count = 0
-            
-            # Eliminar cada archivo del vector store Y de OpenAI Files
-            for file in files_response.data:
-                try:
-                    # Primero eliminar del vector store
-                    self.client.vector_stores.files.delete(
-                        vector_store_id=self.vector_store_id,
-                        file_id=file.id
-                    )
-                    
-                    # Luego eliminar el archivo completamente de OpenAI
-                    self.client.files.delete(file.id)
-                    
-                    deleted_count += 1
-                    logger.info(f"Archivo eliminado: {file.id}")
-                    
-                except Exception as e:
-                    failed_count += 1
-                    logger.warning(f"Error eliminando archivo {file.id}: {e}")
-            
-            # Si hay más archivos (paginación), continuar
-            while files_response.has_more:
-                files_response = self.client.vector_stores.files.list(
-                    vector_store_id=self.vector_store_id,
-                    after=files_response.last_id,
-                    limit=100
+            # LIMPIAR VECTOR STORE COMPLETAMENTE
+            logger.info("🗑️ Limpiando Vector Store anterior...")
+            try:
+                # Obtener todos los archivos actuales
+                current_files = self.client.vector_stores.files.list(
+                    vector_store_id=self.vector_store_id
                 )
                 
-                for file in files_response.data:
+                # Eliminar cada archivo del vector store y de OpenAI
+                deleted_count = 0
+                for file in current_files.data:
                     try:
+                        # Eliminar del vector store
                         self.client.vector_stores.files.delete(
                             vector_store_id=self.vector_store_id,
                             file_id=file.id
                         )
+                        # Eliminar el archivo de OpenAI
                         self.client.files.delete(file.id)
                         deleted_count += 1
-                        logger.info(f"Archivo eliminado: {file.id}")
                     except Exception as e:
-                        failed_count += 1
                         logger.warning(f"Error eliminando archivo {file.id}: {e}")
+                
+                logger.info(f"✅ {deleted_count} archivos eliminados del Vector Store")
+                
+            except Exception as e:
+                logger.error(f"Error limpiando Vector Store: {e}")
             
-            # Limpiar también el tracking local
-            self.db_manager.clear_content_tracking()
-            
-            logger.info(f"Vector Store limpiado: {deleted_count} archivos eliminados, {failed_count} fallos")
-            return {"deleted": deleted_count, "failed": failed_count}
-            
-        except Exception as e:
-            logger.error(f"Error limpiando Vector Store: {e}")
-            raise
-    
-    def update_vector_store_content(self, content_list: List[WebContent]):
-        """Actualiza el vector store LIMPIÁNDOLO primero y subiendo contenido fresco"""
-        try:
-            logger.info(f"Actualizando vector store con {len(content_list)} documentos...")
-            
-            # PASO 1: Limpiar completamente el Vector Store
-            logger.info("PASO 1: Limpiando Vector Store existente...")
-            clean_result = self.clean_vector_store()
-            logger.info(f"Vector Store limpiado: {clean_result['deleted']} archivos eliminados")
-            
-            # PASO 2: Subir todos los nuevos archivos
-            logger.info("PASO 2: Subiendo contenido actualizado...")
-            new_file_ids = []
+            # Crear nuevos archivos
+            logger.info(f"📤 Subiendo {len(content_list)} archivos nuevos al vector store...")
+            new_files = []
             
             for content in content_list:
                 try:
-                    # Crear nuevo archivo
                     file_id = self.create_document_file(content)
-                    new_file_ids.append(file_id)
-                    
-                    # Guardar en tracking
+                    new_files.append(file_id)
                     self.db_manager.save_content_tracking(content, file_id)
-                    
                 except Exception as e:
-                    logger.error(f"Error procesando {content.url}: {e}")
+                    logger.error(f"Error creando archivo para {content.url}: {e}")
             
-            # PASO 3: Añadir archivos al vector store en batch
-            if new_file_ids:
-                logger.info(f"PASO 3: Añadiendo {len(new_file_ids)} archivos al Vector Store...")
-                
+            # Añadir archivos nuevos al vector store
+            if new_files:
                 batch_response = self.client.vector_stores.file_batches.create(
                     vector_store_id=self.vector_store_id,
-                    file_ids=new_file_ids
+                    file_ids=new_files
                 )
                 
                 # Esperar procesamiento
-                logger.info("Esperando procesamiento de archivos...")
+                logger.info("⏳ Esperando procesamiento de archivos...")
                 while batch_response.status in ['in_progress', 'cancelling']:
                     time.sleep(2)
                     batch_response = self.client.vector_stores.file_batches.retrieve(
                         vector_store_id=self.vector_store_id,
                         batch_id=batch_response.id
                     )
-                    logger.info(f"Estado: {batch_response.status} - {batch_response.file_counts.completed}/{batch_response.file_counts.total} archivos procesados")
                 
                 if batch_response.status == 'completed':
-                    logger.info("Vector Store actualizado exitosamente!")
-                    logger.info(f"Total de documentos nuevos: {len(new_file_ids)}")
+                    logger.info(f"✅ Vector Store actualizado: {len(new_files)} documentos")
                 else:
-                    logger.error(f"Error en procesamiento: {batch_response.status}")
-            else:
-                logger.warning("No se generaron archivos para subir")
+                    logger.error(f"❌ Error en procesamiento: {batch_response.status}")
             
-            return {
-                "new": len(new_file_ids), 
-                "updated": 0,  # Ya no hay "actualizados", todo es nuevo
-                "total": len(new_file_ids),
-                "cleaned": clean_result['deleted']
-            }
+            return {"new": len(new_files), "updated": 0, "total": len(new_files)}
             
         except Exception as e:
             logger.error(f"Error actualizando vector store: {e}")
@@ -664,31 +606,37 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
         try:
             thread_id = None
             
+            # Si hay external_id, buscar thread existente
             if external_id:
                 thread_id = self.db_manager.get_thread_id(external_id)
             
+            # Crear thread si no existe
             if not thread_id:
                 thread = self.client.beta.threads.create()
                 thread_id = thread.id
-                logger.info(f"Nuevo thread creado: {thread_id}")
+                logger.info(f"🆕 Nuevo thread creado: {thread_id}")
                 
+                # Guardar mapeo si hay external_id
                 if external_id:
                     self.db_manager.save_thread_mapping(external_id, thread_id)
             else:
-                logger.info(f"Usando thread existente: {thread_id}")
+                logger.info(f"🔄 Usando thread existente: {thread_id}")
             
+            # Añadir mensaje del usuario
             self.client.beta.threads.messages.create(
                 thread_id=thread_id,
                 role="user",
                 content=user_message
             )
             
+            # Ejecutar assistant
             run = self.client.beta.threads.runs.create(
                 thread_id=thread_id,
                 assistant_id=self.assistant_id
             )
             
-            max_wait_time = 60
+            # Esperar respuesta
+            max_wait_time = 60  # 60 segundos máximo
             wait_time = 0
             
             while run.status in ['queued', 'in_progress', 'cancelling'] and wait_time < max_wait_time:
@@ -700,6 +648,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
                 )
             
             if run.status == 'completed':
+                # Obtener mensajes
                 messages = self.client.beta.threads.messages.list(
                     thread_id=thread_id,
                     order='desc',
@@ -741,32 +690,32 @@ class SchoolAssistantWithVectorStore:
             OPENAI_API_KEY, OPENAI_ASSISTANT_ID, OPENAI_VECTOR_STORE_ID, school_name
         )
         self.last_update = None
-        logger.info("School Assistant con Vector Store inicializado")
+        logger.info("🎓 School Assistant con Vector Store inicializado")
     
     def update_knowledge_base(self):
         """Actualiza la base de conocimiento completa"""
         try:
-            logger.info("Iniciando actualización de base de conocimiento...")
+            logger.info("🔄 Iniciando actualización de base de conocimiento...")
             
             # Scraping exhaustivo
             content_list = self.scraper.scrape_website_exhaustive(max_pages=100, max_depth=5)
             
             if not content_list:
-                logger.warning("No se obtuvo contenido del scraping")
+                logger.warning("⚠️ No se obtuvo contenido del scraping")
                 return {"error": "No content scraped"}
             
-            # Actualizar vector store (incluye limpieza automática)
+            # Actualizar vector store
             result = self.assistant_manager.update_vector_store_content(content_list)
             
             self.last_update = datetime.now()
             
-            logger.info("Base de conocimiento actualizada exitosamente")
+            logger.info("✅ Base de conocimiento actualizada exitosamente")
             return {
                 "success": True,
                 "timestamp": self.last_update.isoformat(),
                 "pages_scraped": len(content_list),
                 "files_new": result["new"],
-                "files_cleaned": result["cleaned"]
+                "files_updated": result["updated"]
             }
             
         except Exception as e:
@@ -810,8 +759,8 @@ def init_assistant():
     global assistant
     
     try:
-        logger.info("Inicializando Agustín con OpenAI Assistant + Vector Store...")
-        logger.info(f"Configuración:")
+        logger.info("🚀 Inicializando Agustín con OpenAI Assistant + Vector Store...")
+        logger.info(f"📋 Configuración:")
         logger.info(f"   - URL: {WEBSITE_URL}")
         logger.info(f"   - Escuela: {SCHOOL_NAME}")
         logger.info(f"   - Assistant ID: {OPENAI_ASSISTANT_ID}")
@@ -820,18 +769,18 @@ def init_assistant():
         assistant = SchoolAssistantWithVectorStore(WEBSITE_URL, SCHOOL_NAME)
         
         # Actualización inicial
-        logger.info("Realizando actualización inicial...")
+        logger.info("🔄 Realizando actualización inicial...")
         result = assistant.update_knowledge_base()
         
         if result.get("success"):
-            logger.info("Sistema completamente listo!")
+            logger.info("✅ Sistema completamente listo!")
             return True
         else:
-            logger.warning(f"Actualización inicial con problemas: {result}")
-            return True
+            logger.warning(f"⚠️ Actualización inicial con problemas: {result}")
+            return True  # Continuar aunque haya warnings
             
     except Exception as e:
-        logger.error(f"Error inicializando asistente: {e}")
+        logger.error(f"❌ Error inicializando asistente: {e}")
         return False
 
 # Inicializar automáticamente
@@ -864,6 +813,7 @@ def webhook_chat():
         if not message_body:
             return jsonify({"text": "Por favor escribí tu consulta."}), 400
         
+        # Usar external_id para mantener conversaciones persistentes
         result = assistant.get_response(message_body, external_id)
         
         logger.info(f"Respuesta generada para {external_id}: {result['response'][:100]}...")
@@ -894,12 +844,12 @@ def update_knowledge():
         return jsonify({"error": "Assistant not initialized"}), 500
     
     try:
-        logger.info("Actualización manual de base de conocimiento solicitada")
+        logger.info("🔄 Actualización manual de base de conocimiento solicitada")
         result = assistant.update_knowledge_base()
         
         if result.get("success"):
             return jsonify({
-                "message": "Base de conocimiento actualizada exitosamente (Vector Store limpiado y renovado)",
+                "message": "Base de conocimiento actualizada exitosamente",
                 "result": result
             })
         else:
@@ -935,6 +885,7 @@ def health():
             stats = assistant.get_stats()
             status["stats"] = stats
             
+            # Verificar conexión con OpenAI
             try:
                 assistant_info = assistant.assistant_manager.client.beta.assistants.retrieve(
                     OPENAI_ASSISTANT_ID
@@ -955,7 +906,7 @@ def reinit():
     global assistant
     
     try:
-        logger.info("Reinicialización manual solicitada")
+        logger.info("🔄 Reinicialización manual solicitada")
         assistant = None
         success = init_assistant()
         
@@ -982,6 +933,7 @@ def clear_thread(external_id):
         return jsonify({"error": "Assistant not initialized"}), 500
     
     try:
+        # Eliminar mapeo de thread
         conn = sqlite3.connect(assistant.assistant_manager.db_manager.db_path)
         cursor = conn.cursor()
         cursor.execute('DELETE FROM conversation_threads WHERE external_id = ?', (external_id,))
@@ -1049,6 +1001,7 @@ def vector_store_info():
             OPENAI_VECTOR_STORE_ID
         )
         
+        # Obtener archivos del vector store
         files = assistant.assistant_manager.client.beta.vector_stores.files.list(
             vector_store_id=OPENAI_VECTOR_STORE_ID,
             limit=10
@@ -1083,28 +1036,6 @@ def vector_store_info():
     except Exception as e:
         logger.error(f"Error obteniendo info del vector store: {e}")
         return jsonify({"error": str(e)}), 500
-
-@app.route('/api/vector-store/clean', methods=['POST'])
-def clean_vector_store():
-    """Endpoint para limpiar manualmente el Vector Store"""
-    global assistant
-    
-    if not assistant:
-        return jsonify({"error": "Assistant not initialized"}), 500
-    
-    try:
-        logger.info("Limpieza manual del Vector Store solicitada")
-        result = assistant.assistant_manager.clean_vector_store()
-        
-        return jsonify({
-            "message": "Vector Store limpiado exitosamente",
-            "result": result,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-    except Exception as e:
-        logger.error(f"Error limpiando Vector Store: {e}")
-        return jsonify({"error": str(e)}), 500
         
 @app.route("/chat.js")
 def serve_chat():
@@ -1124,16 +1055,15 @@ def home():
     
     return jsonify({
         "message": f"Agustín - Asistente de {SCHOOL_NAME}",
-        "version": "2.0 - OpenAI Assistant + Vector Store (Con limpieza automática)",
+        "version": "2.0 - OpenAI Assistant + Vector Store",
         "status": "running",
         "features": [
             "OpenAI Assistant nativo integrado",
-            "Vector Store con limpieza automática en cada actualización",
+            "Vector Store para base de conocimiento",
             "Conversaciones persistentes por thread",
             "Scraping exhaustivo automatizado",
             "Actualización automática de conocimiento",
-            "Sistema de tracking de contenido",
-            "Eliminación de archivos duplicados"
+            "Sistema de tracking de contenido"
         ],
         "endpoints": {
             "chat": "/api/chat",
@@ -1143,8 +1073,7 @@ def home():
             "reinit": "/api/reinit",
             "threads": "/api/threads",
             "clear_thread": "/api/threads/<external_id>/clear",
-            "vector_store_info": "/api/vector-store/info",
-            "clean_vector_store": "/api/vector-store/clean"
+            "vector_store_info": "/api/vector-store/info"
         },
         "configuration": {
             "assistant_id": OPENAI_ASSISTANT_ID,
@@ -1162,12 +1091,13 @@ def scheduled_update():
     
     if assistant:
         try:
-            logger.info("Ejecutando actualización programada...")
+            logger.info("🕐 Ejecutando actualización programada...")
             result = assistant.update_knowledge_base()
-            logger.info(f"Actualización programada completada: {result}")
+            logger.info(f"✅ Actualización programada completada: {result}")
         except Exception as e:
             logger.error(f"Error en actualización programada: {e}")
 
+# Programar actualizaciones automáticas
 schedule.every(6).hours.do(scheduled_update)
 
 def run_scheduler():
@@ -1176,39 +1106,38 @@ def run_scheduler():
         schedule.run_pending()
         time.sleep(60)
 
+# Iniciar scheduler en thread separado
 scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
 scheduler_thread.start()
 
 if __name__ == "__main__":
     try:
         print("=" * 60)
-        print("AGUSTÍN - ASISTENTE EDUCATIVO v2.0")
+        print("🎓 AGUSTÍN - ASISTENTE EDUCATIVO v2.0")
         print("=" * 60)
-        print("Servidor iniciado en http://localhost:5000")
-        print("OpenAI Assistant + Vector Store integrado")
-        print("Base de conocimiento actualizable automáticamente")
-        print("Conversaciones persistentes por thread")
-        print("Actualizaciones automáticas cada 6 horas")
-        print("LIMPIEZA AUTOMÁTICA: Vector Store se renueva en cada actualización")
+        print("🌐 Servidor iniciado en http://localhost:5000")
+        print("🤖 OpenAI Assistant + Vector Store integrado")
+        print("📚 Base de conocimiento actualizable automáticamente")
+        print("💬 Conversaciones persistentes por thread")
+        print("⏰ Actualizaciones automáticas cada 6 horas")
         print("-" * 60)
-        print("CONFIGURACIÓN:")
+        print("📋 CONFIGURACIÓN:")
         print(f"   • Assistant ID: {OPENAI_ASSISTANT_ID}")
         print(f"   • Vector Store ID: {OPENAI_VECTOR_STORE_ID}")
         print(f"   • Escuela: {SCHOOL_NAME}")
         print(f"   • Website: {WEBSITE_URL}")
         print("-" * 60)
-        print("ENDPOINTS DISPONIBLES:")
+        print("🔗 ENDPOINTS DISPONIBLES:")
         print("   • Chat: /api/webhook/website")
         print("   • Health: /api/health")
         print("   • Actualizar: /api/update-knowledge")
         print("   • Threads: /api/threads")
         print("   • Vector Store: /api/vector-store/info")
-        print("   • Limpiar Vector Store: /api/vector-store/clean")
         print("=" * 60)
         
         app.run(host='0.0.0.0', port=5000, debug=False)
         
     except Exception as e:
         logger.error(f"Error fatal al inicializar servidor: {e}")
-        print(f"Error al inicializar: {e}")
-        print("Verifica tu archivo .env con las variables necesarias:")
+        print(f"❌ Error al inicializar: {e}")
+        print("📋 Verifica tu archivo .env con las variables necesarias:")
