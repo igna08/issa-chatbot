@@ -612,19 +612,41 @@
     `;
 
     // Función para parsear markdown básico
-    function parseMarkdown(text) {
-        return text
-            // Negrita con **texto** o __texto__
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-            .replace(/__(.*?)__/g, '<strong>$1</strong>')
-            // Cursiva con *texto* o _texto_
-            .replace(/\*(.*?)\*/g, '<em>$1</em>')
-            .replace(/_(.*?)_/g, '<em>$1</em>')
-            // Código con `texto`
-            .replace(/`(.*?)`/g, '<code>$1</code>')
-            // Saltos de línea
-            .replace(/\n/g, '<br>');
-    }
+// Función para parsear markdown completo (reemplaza la función existente en la línea ~448)
+function parseMarkdown(text) {
+    return text
+        // Ocultar marcas de citación como 【4:0†source】
+        .replace(/【[^】]*】/g, '')
+        // Títulos ### (h3)
+        .replace(/^### (.*$)/gim, '<h3 style="font-size: 16px; font-weight: 700; margin: 12px 0 8px 0; color: inherit;">$1</h3>')
+        // Títulos ## (h2)
+        .replace(/^## (.*$)/gim, '<h2 style="font-size: 18px; font-weight: 700; margin: 14px 0 10px 0; color: inherit;">$1</h2>')
+        // Títulos # (h1)
+        .replace(/^# (.*$)/gim, '<h1 style="font-size: 20px; font-weight: 700; margin: 16px 0 12px 0; color: inherit;">$1</h1>')
+        // Listas con viñetas
+        .replace(/^\* (.*$)/gim, '<li style="margin: 4px 0;">$1</li>')
+        .replace(/^- (.*$)/gim, '<li style="margin: 4px 0;">$1</li>')
+        // Listas numeradas
+        .replace(/^\d+\. (.*$)/gim, '<li style="margin: 4px 0;">$1</li>')
+        // Negrita con **texto** o __texto__
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/__(.*?)__/g, '<strong>$1</strong>')
+        // Cursiva con *texto* o _texto_ (pero no si es parte de **)
+        .replace(/(?<!\*)\*(?!\*)([^*]+)\*(?!\*)/g, '<em>$1</em>')
+        .replace(/(?<!_)_(?!_)([^_]+)_(?!_)/g, '<em>$1</em>')
+        // Código inline con `texto`
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        // Bloques de código con ```
+        .replace(/```([\s\S]*?)```/g, '<pre style="background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;"><code>$1</code></pre>')
+        // Enlaces [texto](url)
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline;">$1</a>')
+        // Saltos de línea (doble enter para párrafo nuevo)
+        .replace(/\n\n/g, '</p><p style="margin: 8px 0;">')
+        // Salto de línea simple
+        .replace(/\n/g, '<br>')
+        // Envolver en párrafo si no hay otros bloques
+        .replace(/^(?!<[h|p|li|pre|ul|ol])/gim, '<p style="margin: 8px 0;">');
+}
 
     // Clase principal del widget
     class ChatWidget {
