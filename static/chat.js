@@ -257,12 +257,24 @@
         }
         
         .message-content ul, .message-content ol {
-            margin: 8px 0;
-            padding-left: 20px;
+            margin: 6px 0;
+            padding-left: 18px;
         }
         
         .message-content li {
-            margin: 4px 0;
+            margin: 2px 0;
+            line-height: 1.4;
+        }
+        
+        .message-content h1, 
+        .message-content h2, 
+        .message-content h3 {
+            margin-top: 12px;
+            margin-bottom: 6px;
+        }
+        
+        .message-content p {
+            margin: 6px 0;
         }
         
         .typing-indicator {
@@ -611,244 +623,48 @@
         }
     `;
 
-    // Función para parsear markdown básico
-// Función para parsear markdown completo (reemplaza la función existente en la línea ~448)
-// Función para parsear markdown completo (reemplaza la función existente en la línea ~448)
-function parseMarkdown(text) {
-    // Primero, eliminar todas las marcas de citación
-    text = text.replace(/【[^】]+】/g, '');
-    text = text.replace(/\[[\d:†\w]+\]/g, '');
-    text = text.replace(/【.*?】/g, '');
-    
-    return text
-        // Títulos ### (h3)
-        .replace(/^### (.*$)/gim, '<h3 style="font-size: 16px; font-weight: 700; margin: 12px 0 8px 0; color: inherit;">$1</h3>')
-        // Títulos ## (h2)
-        .replace(/^## (.*$)/gim, '<h2 style="font-size: 18px; font-weight: 700; margin: 14px 0 10px 0; color: inherit;">$1</h2>')
-        // Títulos # (h1)
-        .replace(/^# (.*$)/gim, '<h1 style="font-size: 20px; font-weight: 700; margin: 16px 0 12px 0; color: inherit;">$1</h1>')
-        // Listas con viñetas
-        .replace(/^\* (.*$)/gim, '<li style="margin: 4px 0;">$1</li>')
-        .replace(/^- (.*$)/gim, '<li style="margin: 4px 0;">$1</li>')
-        // Listas numeradas
-        .replace(/^\d+\. (.*$)/gim, '<li style="margin: 4px 0;">$1</li>')
-        // Negrita con **texto** o __texto__
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/__(.*?)__/g, '<strong>$1</strong>')
-        // Cursiva con *texto* o _texto_ (pero no si es parte de **)
-        .replace(/(?<!\*)\*(?!\*)([^*]+)\*(?!\*)/g, '<em>$1</em>')
-        .replace(/(?<!_)_(?!_)([^_]+)_(?!_)/g, '<em>$1</em>')
-        // Código inline con `texto`
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        // Bloques de código con ```
-        .replace(/```([\s\S]*?)```/g, '<pre style="background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;"><code>$1</code></pre>')
-        // Enlaces [texto](url)
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline;">$1</a>')
-        // Saltos de línea (doble enter para párrafo nuevo)
-        .replace(/\n\n/g, '</p><p style="margin: 8px 0;">')
-        // Salto de línea simple
-        .replace(/\n/g, '<br>')
-        // Envolver en párrafo si no hay otros bloques
-        .replace(/^(?!<[h|p|li|pre|ul|ol])/gim, '<p style="margin: 8px 0;">');
-}
+    // Función para parsear markdown completo
+    function parseMarkdown(text) {
+        // Primero, eliminar todas las marcas de citación
+        text = text.replace(/【[^】]+】/g, '');
+        text = text.replace(/\[[\d:†\w]+\]/g, '');
+        text = text.replace(/【.*?】/g, '');
+        
+        return text
+            // Títulos ### (h3)
+            .replace(/^### (.*$)/gim, '<h3 style="font-size: 16px; font-weight: 700; margin: 10px 0 6px 0; color: inherit;">$1</h3>')
+            // Títulos ## (h2)
+            .replace(/^## (.*$)/gim, '<h2 style="font-size: 18px; font-weight: 700; margin: 12px 0 6px 0; color: inherit;">$1</h2>')
+            // Títulos # (h1)
+            .replace(/^# (.*$)/gim, '<h1 style="font-size: 20px; font-weight: 700; margin: 14px 0 8px 0; color: inherit;">$1</h1>')
+            // Listas con viñetas
+            .replace(/^\* (.*$)/gim, '<li style="margin: 2px 0; line-height: 1.4;">$1</li>')
+            .replace(/^- (.*$)/gim, '<li style="margin: 2px 0; line-height: 1.4;">$1</li>')
+            // Listas numeradas
+            .replace(/^\d+\. (.*$)/gim, '<li style="margin: 2px 0; line-height: 1.4;">$1</li>')
+            // Negrita con **texto** o __texto__
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            .replace(/__(.*?)__/g, '<strong>$1</strong>')
+            // Cursiva con *texto* o _texto_ (pero no si es parte de **)
+            .replace(/(?<!\*)\*(?!\*)([^*]+)\*(?!\*)/g, '<em>$1</em>')
+            .replace(/(?<!_)_(?!_)([^_]+)_(?!_)/g, '<em>$1</em>')
+            // Código inline con `texto`
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            // Bloques de código con ```
+            .replace(/```([\s\S]*?)```/g, '<pre style="background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;"><code>$1</code></pre>')
+            // Enlaces [texto](url)
+            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline;">$1</a>')
+            // Saltos de línea (doble enter para párrafo nuevo)
+            .replace(/\n\n/g, '</p><p style="margin: 6px 0;">')
+            // Salto de línea simple
+            .replace(/\n/g, '<br>')
+            // Envolver en párrafo si no hay otros bloques
+            .replace(/^(?!<[h|p|li|pre|ul|ol])/gim, '<p style="margin: 6px 0;">');
+    }
 
     // Clase principal del widget
     class ChatWidget {
         constructor(config) {
-            this.config = config;
-            this.isOpen = false;
-            this.userId = this.getUserId();
-            this.chatHistory = this.loadChatHistory();
-            this.isTyping = false;
-            this.retryCount = 0;
-            this.maxRetries = 3;
-            this.init();
-        }
-
-        init() {
-            this.injectStyles();
-            this.createWidget();
-            this.attachEventListeners();
-            this.restoreChatHistory();
-        }
-
-        injectStyles() {
-            if (!document.getElementById('chat-widget-styles')) {
-                const styleSheet = document.createElement('style');
-                styleSheet.id = 'chat-widget-styles';
-                styleSheet.textContent = widgetStyles;
-                document.head.appendChild(styleSheet);
-            }
-        }
-
-        createWidget() {
-            // Eliminar widget existente si existe
-            const existing = document.getElementById('chat-widget-container');
-            if (existing) {
-                existing.remove();
-            }
-
-            const container = document.createElement('div');
-            container.id = 'chat-widget-container';
-
-            const button = document.createElement('button');
-            button.id = 'chat-widget-button';
-            button.innerHTML = `
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                </svg>
-            `;
-
-            const window = document.createElement('div');
-            window.id = 'chat-widget-window';
-            window.innerHTML = `
-                <div class="chat-header">
-                    <div class="chat-header-content">
-                        <div>
-                            <h3>Agustín</h3>
-                            <div class="chat-status">
-                                <div class="status-dot"></div>
-                                <span>Asistente del Colegio San Agustín</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="chat-messages" id="chat-messages">
-                </div>
-                
-                <div class="typing-indicator" id="typing-indicator">
-                    <span>Agustín está escribiendo</span>
-                    <div class="typing-dots">
-                        <div class="typing-dot"></div>
-                        <div class="typing-dot"></div>
-                        <div class="typing-dot"></div>
-                    </div>
-                </div>
-                
-                <div class="chat-input">
-                    <form class="input-form" id="chat-form">
-                        <div class="input-wrapper">
-                            <textarea 
-                                class="message-input" 
-                                id="message-input" 
-                                placeholder="Escribí tu consulta sobre el colegio..."
-                                rows="1"
-                            ></textarea>
-                        </div>
-                        <button type="submit" class="send-button" id="send-button">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
-                                <line x1="22" y1="2" x2="11" y2="13"></line>
-                                <polygon points="22,2 15,22 11,13 2,9 22,2"></polygon>
-                            </svg>
-                        </button>
-                    </form>
-                </div>
-            `;
-
-            container.appendChild(button);
-            container.appendChild(window);
-            document.body.appendChild(container);
-
-            this.button = button;
-            this.window = window;
-            this.messagesContainer = document.getElementById('chat-messages');
-            this.messageInput = document.getElementById('message-input');
-            this.sendButton = document.getElementById('send-button');
-            this.typingIndicator = document.getElementById('typing-indicator');
-            this.chatForm = document.getElementById('chat-form');
-        }
-
-        showEmptyState() {
-            if (this.chatHistory.length === 0) {
-                this.messagesContainer.innerHTML = `
-                    <div class="empty-state">
-                        <svg class="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                        </svg>
-                        <h4>¡Hola! Soy Agustín</h4>
-                        <p>Tu asistente del Colegio San Agustín.<br>¿En qué te puedo ayudar hoy?</p>
-                    </div>
-                `;
-            }
-        }
-
-        attachEventListeners() {
-            this.button.addEventListener('click', (e) => {
-                e.preventDefault();
-                this.toggleChat();
-            });
-
-            document.addEventListener('keydown', (e) => {
-                if (e.key === 'Escape' && this.isOpen) {
-                    this.closeChat();
-                }
-            });
-
-            this.chatForm.addEventListener('submit', (e) => {
-                e.preventDefault();
-                if (!this.isTyping) {
-                    this.sendMessage();
-                }
-            });
-
-            this.messageInput.addEventListener('input', () => {
-                this.autoResizeTextarea();
-            });
-
-            this.messageInput.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' && !e.shiftKey && !this.isTyping) {
-                    e.preventDefault();
-                    this.sendMessage();
-                }
-            });
-
-            // Cerrar al hacer clic fuera
-            document.addEventListener('click', (e) => {
-                if (this.isOpen && 
-                    !this.window.contains(e.target) && 
-                    !this.button.contains(e.target) &&
-                    !e.target.closest('#chat-widget-container')) {
-                    this.closeChat();
-                }
-            });
-        }
-
-        toggleChat() {
-            if (this.isOpen) {
-                this.closeChat();
-            } else {
-                this.openChat();
-            }
-        }
-
-        openChat() {
-            this.isOpen = true;
-            this.window.classList.add('show');
-            this.button.classList.add('active');
-            
-            setTimeout(() => {
-                this.messageInput.focus();
-                this.scrollToBottom();
-            }, 100);
-        }
-
-        closeChat() {
-            this.isOpen = false;
-            this.window.classList.remove('show');
-            this.button.classList.remove('active');
-        }
-
-        async sendMessage() {
-            const message = this.messageInput.value.trim();
-            if (!message || this.isTyping) return;
-
-            // Limpiar estado vacío si existe
-            const emptyState = this.messagesContainer.querySelector('.empty-state');
-            if (emptyState) {
-                emptyState.remove();
-            }
-
             this.setInputState(false);
             this.addMessage(message, 'user');
             this.messageInput.value = '';
@@ -1059,4 +875,198 @@ function parseMarkdown(text) {
     }
     window.chatWidgetInitialized = true;
 
-})();
+})();.config = config;
+            this.isOpen = false;
+            this.userId = this.getUserId();
+            this.chatHistory = this.loadChatHistory();
+            this.isTyping = false;
+            this.retryCount = 0;
+            this.maxRetries = 3;
+            this.init();
+        }
+
+        init() {
+            this.injectStyles();
+            this.createWidget();
+            this.attachEventListeners();
+            this.restoreChatHistory();
+        }
+
+        injectStyles() {
+            if (!document.getElementById('chat-widget-styles')) {
+                const styleSheet = document.createElement('style');
+                styleSheet.id = 'chat-widget-styles';
+                styleSheet.textContent = widgetStyles;
+                document.head.appendChild(styleSheet);
+            }
+        }
+
+        createWidget() {
+            // Eliminar widget existente si existe
+            const existing = document.getElementById('chat-widget-container');
+            if (existing) {
+                existing.remove();
+            }
+
+            const container = document.createElement('div');
+            container.id = 'chat-widget-container';
+
+            const button = document.createElement('button');
+            button.id = 'chat-widget-button';
+            button.innerHTML = `
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                </svg>
+            `;
+
+            const window = document.createElement('div');
+            window.id = 'chat-widget-window';
+            window.innerHTML = `
+                <div class="chat-header">
+                    <div class="chat-header-content">
+                        <div>
+                            <h3>Agustín</h3>
+                            <div class="chat-status">
+                                <div class="status-dot"></div>
+                                <span>Asistente del Colegio San Agustín</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="chat-messages" id="chat-messages">
+                </div>
+                
+                <div class="typing-indicator" id="typing-indicator">
+                    <span>Agustín está escribiendo</span>
+                    <div class="typing-dots">
+                        <div class="typing-dot"></div>
+                        <div class="typing-dot"></div>
+                        <div class="typing-dot"></div>
+                    </div>
+                </div>
+                
+                <div class="chat-input">
+                    <form class="input-form" id="chat-form">
+                        <div class="input-wrapper">
+                            <textarea 
+                                class="message-input" 
+                                id="message-input" 
+                                placeholder="Escribí tu consulta sobre el colegio..."
+                                rows="1"
+                            ></textarea>
+                        </div>
+                        <button type="submit" class="send-button" id="send-button">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                <line x1="22" y1="2" x2="11" y2="13"></line>
+                                <polygon points="22,2 15,22 11,13 2,9 22,2"></polygon>
+                            </svg>
+                        </button>
+                    </form>
+                </div>
+            `;
+
+            container.appendChild(button);
+            container.appendChild(window);
+            document.body.appendChild(container);
+
+            this.button = button;
+            this.window = window;
+            this.messagesContainer = document.getElementById('chat-messages');
+            this.messageInput = document.getElementById('message-input');
+            this.sendButton = document.getElementById('send-button');
+            this.typingIndicator = document.getElementById('typing-indicator');
+            this.chatForm = document.getElementById('chat-form');
+        }
+
+        showEmptyState() {
+            if (this.chatHistory.length === 0) {
+                this.messagesContainer.innerHTML = `
+                    <div class="empty-state">
+                        <svg class="empty-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        <h4>¡Hola! Soy Agustín</h4>
+                        <p>Tu asistente del Colegio San Agustín.<br>¿En qué te puedo ayudar hoy?</p>
+                    </div>
+                `;
+            }
+        }
+
+        attachEventListeners() {
+            this.button.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.toggleChat();
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && this.isOpen) {
+                    this.closeChat();
+                }
+            });
+
+            this.chatForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                if (!this.isTyping) {
+                    this.sendMessage();
+                }
+            });
+
+            this.messageInput.addEventListener('input', () => {
+                this.autoResizeTextarea();
+            });
+
+            this.messageInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !this.isTyping) {
+                    e.preventDefault();
+                    this.sendMessage();
+                }
+            });
+
+            // Cerrar al hacer clic fuera
+            document.addEventListener('click', (e) => {
+                if (this.isOpen && 
+                    !this.window.contains(e.target) && 
+                    !this.button.contains(e.target) &&
+                    !e.target.closest('#chat-widget-container')) {
+                    this.closeChat();
+                }
+            });
+        }
+
+        toggleChat() {
+            if (this.isOpen) {
+                this.closeChat();
+            } else {
+                this.openChat();
+            }
+        }
+
+        openChat() {
+            this.isOpen = true;
+            this.window.classList.add('show');
+            this.button.classList.add('active');
+            
+            setTimeout(() => {
+                this.messageInput.focus();
+                this.scrollToBottom();
+            }, 100);
+        }
+
+        closeChat() {
+            this.isOpen = false;
+            this.window.classList.remove('show');
+            this.button.classList.remove('active');
+        }
+
+        async sendMessage() {
+            const message = this.messageInput.value.trim();
+            if (!message || this.isTyping) return;
+
+            // Limpiar estado vacío si existe
+            const emptyState = this.messagesContainer.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            this
