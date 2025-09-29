@@ -483,10 +483,10 @@ class OpenAIAssistantManager:
     def _verify_resources(self):
         """Verifica que el assistant y vector store existen"""
         try:
-            assistant = self.client.beta.assistants.retrieve(self.assistant_id)
+            assistant = self.client.assistants.retrieve(self.assistant_id)
             logger.info(f"✓ Assistant encontrado: {assistant.name}")
             
-            vector_store = self.client.beta.vector_stores.retrieve(self.vector_store_id)
+            vector_store = self.client.vector_stores.retrieve(self.vector_store_id)
             logger.info(f"✓ Vector Store encontrado: {vector_store.name}")
             
             self.db_manager.save_assistant_config(self.assistant_id, self.vector_store_id)
@@ -537,7 +537,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             logger.info("Limpiando Vector Store...")
             
             # Obtener todos los archivos del vector store
-            files_response = self.client.beta.vector_stores.files.list(
+            files_response = self.client.vector_stores.files.list(
                 vector_store_id=self.vector_store_id,
                 limit=100
             )
@@ -549,7 +549,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             for file in files_response.data:
                 try:
                     # Primero eliminar del vector store
-                    self.client.beta.vector_stores.files.delete(
+                    self.client.vector_stores.files.delete(
                         vector_store_id=self.vector_store_id,
                         file_id=file.id
                     )
@@ -566,7 +566,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             
             # Si hay más archivos (paginación), continuar
             while files_response.has_more:
-                files_response = self.client.beta.vector_stores.files.list(
+                files_response = self.client.vector_stores.files.list(
                     vector_store_id=self.vector_store_id,
                     after=files_response.last_id,
                     limit=100
@@ -574,7 +574,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
                 
                 for file in files_response.data:
                     try:
-                        self.client.beta.vector_stores.files.delete(
+                        self.client.vector_stores.files.delete(
                             vector_store_id=self.vector_store_id,
                             file_id=file.id
                         )
@@ -625,7 +625,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             if new_file_ids:
                 logger.info(f"PASO 3: Añadiendo {len(new_file_ids)} archivos al Vector Store...")
                 
-                batch_response = self.client.beta.vector_stores.file_batches.create(
+                batch_response = self.client.vector_stores.file_batches.create(
                     vector_store_id=self.vector_store_id,
                     file_ids=new_file_ids
                 )
@@ -634,7 +634,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
                 logger.info("Esperando procesamiento de archivos...")
                 while batch_response.status in ['in_progress', 'cancelling']:
                     time.sleep(2)
-                    batch_response = self.client.beta.vector_stores.file_batches.retrieve(
+                    batch_response = self.client.vector_stores.file_batches.retrieve(
                         vector_store_id=self.vector_store_id,
                         batch_id=batch_response.id
                     )
