@@ -257,24 +257,12 @@
         }
         
         .message-content ul, .message-content ol {
-            margin: 6px 0;
-            padding-left: 18px;
+            margin: 8px 0;
+            padding-left: 20px;
         }
         
         .message-content li {
-            margin: 2px 0;
-            line-height: 1.4;
-        }
-        
-        .message-content h1, 
-        .message-content h2, 
-        .message-content h3 {
-            margin-top: 12px;
-            margin-bottom: 6px;
-        }
-        
-        .message-content p {
-            margin: 6px 0;
+            margin: 4px 0;
         }
         
         .typing-indicator {
@@ -623,259 +611,47 @@
         }
     `;
 
-    // Función para parsear markdown completo
-    function parseMarkdown(text) {
-        // Primero, eliminar todas las marcas de citación
-        text = text.replace(/【[^】]+】/g, '');
-        text = text.replace(/\[[\d:†\w]+\]/g, '');
-        text = text.replace(/【.*?】/g, '');
-        
-        return text
-            // Títulos ### (h3)
-            .replace(/^### (.*$)/gim, '<h3 style="font-size: 16px; font-weight: 700; margin: 10px 0 6px 0; color: inherit;">$1</h3>')
-            // Títulos ## (h2)
-            .replace(/^## (.*$)/gim, '<h2 style="font-size: 18px; font-weight: 700; margin: 12px 0 6px 0; color: inherit;">$1</h2>')
-            // Títulos # (h1)
-            .replace(/^# (.*$)/gim, '<h1 style="font-size: 20px; font-weight: 700; margin: 14px 0 8px 0; color: inherit;">$1</h1>')
-            // Listas con viñetas
-            .replace(/^\* (.*$)/gim, '<li style="margin: 2px 0; line-height: 1.4;">$1</li>')
-            .replace(/^- (.*$)/gim, '<li style="margin: 2px 0; line-height: 1.4;">$1</li>')
-            // Listas numeradas
-            .replace(/^\d+\. (.*$)/gim, '<li style="margin: 2px 0; line-height: 1.4;">$1</li>')
-            // Negrita con **texto** o __texto__
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-            .replace(/__(.*?)__/g, '<strong>$1</strong>')
-            // Cursiva con *texto* o _texto_ (pero no si es parte de **)
-            .replace(/(?<!\*)\*(?!\*)([^*]+)\*(?!\*)/g, '<em>$1</em>')
-            .replace(/(?<!_)_(?!_)([^_]+)_(?!_)/g, '<em>$1</em>')
-            // Código inline con `texto`
-            .replace(/`([^`]+)`/g, '<code>$1</code>')
-            // Bloques de código con ```
-            .replace(/```([\s\S]*?)```/g, '<pre style="background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;"><code>$1</code></pre>')
-            // Enlaces [texto](url)
-            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline;">$1</a>')
-            // Saltos de línea (doble enter para párrafo nuevo)
-            .replace(/\n\n/g, '</p><p style="margin: 6px 0;">')
-            // Salto de línea simple
-            .replace(/\n/g, '<br>')
-            // Envolver en párrafo si no hay otros bloques
-            .replace(/^(?!<[h|p|li|pre|ul|ol])/gim, '<p style="margin: 6px 0;">');
-    }
+    // Función para parsear markdown básico
+// Función para parsear markdown completo (reemplaza la función existente en la línea ~448)
+function parseMarkdown(text) {
+    return text
+        // Ocultar marcas de citación como 【4:0†source】
+        .replace(/【[^】]*】/g, '')
+        // Títulos ### (h3)
+        .replace(/^### (.*$)/gim, '<h3 style="font-size: 16px; font-weight: 700; margin: 12px 0 8px 0; color: inherit;">$1</h3>')
+        // Títulos ## (h2)
+        .replace(/^## (.*$)/gim, '<h2 style="font-size: 18px; font-weight: 700; margin: 14px 0 10px 0; color: inherit;">$1</h2>')
+        // Títulos # (h1)
+        .replace(/^# (.*$)/gim, '<h1 style="font-size: 20px; font-weight: 700; margin: 16px 0 12px 0; color: inherit;">$1</h1>')
+        // Listas con viñetas
+        .replace(/^\* (.*$)/gim, '<li style="margin: 4px 0;">$1</li>')
+        .replace(/^- (.*$)/gim, '<li style="margin: 4px 0;">$1</li>')
+        // Listas numeradas
+        .replace(/^\d+\. (.*$)/gim, '<li style="margin: 4px 0;">$1</li>')
+        // Negrita con **texto** o __texto__
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/__(.*?)__/g, '<strong>$1</strong>')
+        // Cursiva con *texto* o _texto_ (pero no si es parte de **)
+        .replace(/(?<!\*)\*(?!\*)([^*]+)\*(?!\*)/g, '<em>$1</em>')
+        .replace(/(?<!_)_(?!_)([^_]+)_(?!_)/g, '<em>$1</em>')
+        // Código inline con `texto`
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        // Bloques de código con ```
+        .replace(/```([\s\S]*?)```/g, '<pre style="background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;"><code>$1</code></pre>')
+        // Enlaces [texto](url)
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" style="color: #4f46e5; text-decoration: underline;">$1</a>')
+        // Saltos de línea (doble enter para párrafo nuevo)
+        .replace(/\n\n/g, '</p><p style="margin: 8px 0;">')
+        // Salto de línea simple
+        .replace(/\n/g, '<br>')
+        // Envolver en párrafo si no hay otros bloques
+        .replace(/^(?!<[h|p|li|pre|ul|ol])/gim, '<p style="margin: 8px 0;">');
+}
 
     // Clase principal del widget
     class ChatWidget {
         constructor(config) {
-            this.setInputState(false);
-            this.addMessage(message, 'user');
-            this.messageInput.value = '';
-            this.autoResizeTextarea();
-            this.showTypingIndicator();
-
-            try {
-                // Payload compatible con tu backend Python
-                const payload = {
-                    channel: "website",
-                    externalId: this.userId,
-                    from: this.userId,
-                    timestamp: new Date().toISOString(),
-                    type: "text",
-                    body: message
-                };
-
-                const response = await fetch(this.config.apiUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Accept': 'application/json'
-                    },
-                    body: JSON.stringify(payload)
-                });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-
-                const data = await response.json();
-                this.hideTypingIndicator();
-
-                let responseText = '';
-                if (data.text) {
-                    responseText = data.text;
-                } else {
-                    responseText = 'Disculpá, tuve un problemita técnico. ¿Podés intentar de nuevo?';
-                }
-
-                this.addMessage(responseText, 'assistant');
-                this.saveChatHistory();
-                this.retryCount = 0;
-
-            } catch (error) {
-                console.error('Error:', error);
-                this.hideTypingIndicator();
-                
-                if (this.retryCount < this.maxRetries) {
-                    this.retryCount++;
-                    this.showError(`Error de conexión. Reintentando... (${this.retryCount}/${this.maxRetries})`);
-                    setTimeout(() => this.sendMessage(), 2000);
-                    return;
-                } else {
-                    this.showError('Disculpá, tengo problemas para conectarme. Por favor, intentá más tarde o contactá directamente al colegio.');
-                }
-            } finally {
-                this.setInputState(true);
-            }
-        }
-
-        addMessage(text, type) {
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `chat-message ${type}`;
-
-            const contentDiv = document.createElement('div');
-            contentDiv.className = 'message-content';
-            
-            // Parsear markdown si es mensaje del asistente
-            if (type === 'assistant') {
-                contentDiv.innerHTML = parseMarkdown(text);
-            } else {
-                contentDiv.textContent = text;
-            }
-
-            messageDiv.appendChild(contentDiv);
-            this.messagesContainer.appendChild(messageDiv);
-
-            // Agregar a historial
-            this.chatHistory.push({ text, type, timestamp: Date.now() });
-            this.scrollToBottom();
-        }
-
-        showTypingIndicator() {
-            this.isTyping = true;
-            this.typingIndicator.style.display = 'flex';
-            this.scrollToBottom();
-        }
-
-        hideTypingIndicator() {
-            this.isTyping = false;
-            this.typingIndicator.style.display = 'none';
-        }
-
-        setInputState(enabled) {
-            this.messageInput.disabled = !enabled;
-            this.sendButton.disabled = !enabled;
-            
-            if (enabled) {
-                this.messageInput.focus();
-            }
-        }
-
-        showError(message) {
-            const errorDiv = document.createElement('div');
-            errorDiv.className = 'error-message';
-            errorDiv.textContent = message;
-            
-            this.messagesContainer.appendChild(errorDiv);
-            this.scrollToBottom();
-
-            setTimeout(() => {
-                if (errorDiv.parentNode) {
-                    errorDiv.remove();
-                }
-            }, 5000);
-        }
-
-        autoResizeTextarea() {
-            this.messageInput.style.height = 'auto';
-            const newHeight = Math.min(this.messageInput.scrollHeight, 120);
-            this.messageInput.style.height = newHeight + 'px';
-        }
-
-        scrollToBottom() {
-            requestAnimationFrame(() => {
-                this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
-            });
-        }
-
-        getUserId() {
-            let userId = localStorage.getItem('san-agustin-chat-user-id');
-            if (!userId) {
-                userId = 'user-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now();
-                localStorage.setItem('san-agustin-chat-user-id', userId);
-            }
-            return userId;
-        }
-
-        saveChatHistory() {
-            try {
-                const recentHistory = this.chatHistory.slice(-30);
-                localStorage.setItem('san-agustin-chat-history', JSON.stringify(recentHistory));
-            } catch (error) {
-                console.warn('No se pudo guardar el historial del chat:', error);
-            }
-        }
-
-        loadChatHistory() {
-            try {
-                const history = localStorage.getItem('san-agustin-chat-history');
-                return history ? JSON.parse(history) : [];
-            } catch (error) {
-                console.warn('No se pudo cargar el historial del chat:', error);
-                return [];
-            }
-        }
-
-        restoreChatHistory() {
-            this.messagesContainer.innerHTML = '';
-
-            if (this.chatHistory.length === 0) {
-                this.showEmptyState();
-                return;
-            }
-
-            this.chatHistory.forEach(msg => {
-                if (msg.text && msg.type) {
-                    const messageDiv = document.createElement('div');
-                    messageDiv.className = `chat-message ${msg.type}`;
-
-                    const contentDiv = document.createElement('div');
-                    contentDiv.className = 'message-content';
-                    
-                    // Parsear markdown si es mensaje del asistente
-                    if (msg.type === 'assistant') {
-                        contentDiv.innerHTML = parseMarkdown(msg.text);
-                    } else {
-                        contentDiv.textContent = msg.text;
-                    }
-
-                    messageDiv.appendChild(contentDiv);
-                    this.messagesContainer.appendChild(messageDiv);
-                }
-            });
-
-            this.scrollToBottom();
-        }
-    }
-
-    // Inicializar el widget cuando el DOM esté listo
-    function initChatWidget() {
-        if (window.chatWidgetSanAgustin) {
-            return;
-        }
-        
-        window.chatWidgetSanAgustin = new ChatWidget(CHAT_CONFIG);
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initChatWidget);
-    } else {
-        initChatWidget();
-    }
-
-    if (window.chatWidgetInitialized) {
-        return;
-    }
-    window.chatWidgetInitialized = true;
-
-})();.config = config;
+            this.config = config;
             this.isOpen = false;
             this.userId = this.getUserId();
             this.chatHistory = this.loadChatHistory();
