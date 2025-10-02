@@ -1069,4 +1069,214 @@
                 emptyState.remove();
             }
 
-            this
+            this.setInputState(false);
+            this.addMessage(message, 'user');
+            this.messageInput.value = '';
+            this.autoResizeTextarea();
+            this.showTypingIndicator();
+
+            try {
+                // Payload compatible con tu backend Python
+                const payload = {
+                    channel: "website",
+                    externalId: this.userId,
+                    from: this.userId,
+                    timestamp: new Date().toISOString(),
+                    type: "text",
+                    body: message
+                };
+
+                const response = await fetch(this.config.apiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                this.hideTypingIndicator();
+
+                let responseText = '';
+                if (data.text) {
+                    responseText = data.text;
+                } else {
+                    responseText = 'Disculpá, tuve un problemita técnico. ¿Podés intentar de nuevo?';
+                }
+
+                this.addMessage(responseText, 'assistant');
+                this.saveChatHistory();
+                this.retryCount = 0;
+
+            } catch (error) {
+                console.error('Error:', error);
+                this.hideTypingIndicator();
+                
+                if (this.retryCount < this.maxRetries) {
+                    this.retryCount++;
+                    this.showError(`Error de conexión. Reintentando... (${this.retryCount}/${this.maxRetries})`);
+                    setTimeout(() => this.sendMessage(), 2000);
+                    return;
+                } else {
+                    this.showError('Disculpá, tengo problemas para conectarme. Por favor, intentá más tarde o contactá directamente al colegio.');
+                }
+            } finally {
+                this.setInputState(true);
+            }
+        }
+
+        addMessage(text, type) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `chat-message ${type}`;
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+            
+            // Parsear markdown si es mensaje del asistente
+            if (type === 'assistant') {
+                contentDiv.innerHTML = parseMarkdown(text);
+            } else {
+                contentDiv.textContent = text;
+            }
+
+            messageDiv.appendChild(contentDiv);
+            this.messagesContainer.appendChild(messageDiv);
+
+            // Agregar a historial
+            this.chatHistory.push({ text, type, timestamp: Date.now() });
+            this.scrollToBottom();
+        }
+
+        showTypingIndicator() {
+            this.isTyping = true;
+            this.typingIndicator.style.display = 'flex';
+            this.scrollToBottom();
+        }
+
+        hideTypingIndicator() {
+            this.isTyping = false;
+            this.typingIndicator.style.display = 'none';
+        }
+
+        setInputState(enabled) {
+            this.messageInput.disabled = !enabled;
+            this.sendButton.disabled = !enabled;
+            
+            if (enabled) {
+                this.messageInput.focus();
+            }
+        }
+
+        showError(message) {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'error-message';
+            errorDiv.textContent = message;
+            
+            this.messagesContainer.appendChild(errorDiv);
+            this.scrollToBottom();
+
+            setTimeout(() => {
+                if (errorDiv.parentNode) {
+                    errorDiv.remove();
+                }
+            }, 5000);
+        }
+
+        autoResizeTextarea() {
+            this.messageInput.style.height = 'auto';
+            const newHeight = Math.min(this.messageInput.scrollHeight, 120);
+            this.messageInput.style.height = newHeight + 'px';
+        }
+
+        scrollToBottom() {
+            requestAnimationFrame(() => {
+                this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+            });
+        }
+
+        getUserId() {
+            let userId = localStorage.getItem('san-agustin-chat-user-id');
+            if (!userId) {
+                userId = 'user-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now();
+                localStorage.setItem('san-agustin-chat-user-id', userId);
+            }
+            return userId;
+        }
+
+        saveChatHistory() {
+            try {
+                const recentHistory = this.chatHistory.slice(-30);
+                localStorage.setItem('san-agustin-chat-history', JSON.stringify(recentHistory));
+            } catch (error) {
+                console.warn('No se pudo guardar el historial del chat:', error);
+            }
+        }
+
+        loadChatHistory() {
+            try {
+                const history = localStorage.getItem('san-agustin-chat-history');
+                return history ? JSON.parse(history) : [];
+            } catch (error) {
+                console.warn('No se pudo cargar el historial del chat:', error);
+                return [];
+            }
+        }
+
+        restoreChatHistory() {
+            this.messagesContainer.innerHTML = '';
+
+            if (this.chatHistory.length === 0) {
+                this.showEmptyState();
+                return;
+            }
+
+            this.chatHistory.forEach(msg => {
+                if (msg.text && msg.type) {
+                    const messageDiv = document.createElement('div');
+                    messageDiv.className = `chat-message ${msg.type}`;
+
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = 'message-content';
+                    
+                    // Parsear markdown si es mensaje del asistente
+                    if (msg.type === 'assistant') {
+                        contentDiv.innerHTML = parseMarkdown(msg.text);
+                    } else {
+                        contentDiv.textContent = msg.text;
+                    }
+
+                    messageDiv.appendChild(contentDiv);
+                    this.messagesContainer.appendChild(messageDiv);
+                }
+            });
+
+            this.scrollToBottom();
+        }
+    }
+
+    // Inicializar el widget cuando el DOM esté listo
+    function initChatWidget() {
+        if (window.chatWidgetSanAgustin) {
+            return;
+        }
+        
+        window.chatWidgetSanAgustin = new ChatWidget(CHAT_CONFIG);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initChatWidget);
+    } else {
+        initChatWidget();
+    }
+
+    if (window.chatWidgetInitialized) {
+        return;
+    }
+    window.chatWidgetInitialized = true;
+
+})();
