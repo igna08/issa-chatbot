@@ -726,13 +726,13 @@ class SchoolAssistantWithVectorStore:
         """Obtiene respuesta del assistant"""
         return self.assistant_manager.get_response(user_message, external_id)
     
-    def get_stats(self) -> Dict:
+def get_stats(self) -> Dict:
         """Obtiene estadísticas del sistema"""
         try:
             tracking_data = self.assistant_manager.db_manager.get_content_tracking()
             
             # Estadísticas del vector store
-            vector_store = self.assistant_manager.client.beta.vector_stores.retrieve(
+            vector_store = self.assistant_manager.client.vector_stores.retrieve(
                 self.assistant_manager.vector_store_id
             )
             
@@ -997,12 +997,12 @@ def vector_store_info():
         return jsonify({"error": "Assistant not initialized"}), 500
     
     try:
-        vector_store = assistant.assistant_manager.client.beta.vector_stores.retrieve(
+        vector_store = assistant.assistant_manager.client.vector_stores.retrieve(
             OPENAI_VECTOR_STORE_ID
         )
         
         # Obtener archivos del vector store
-        files = assistant.assistant_manager.client.beta.vector_stores.files.list(
+        files = assistant.assistant_manager.client.vector_stores.files.list(
             vector_store_id=OPENAI_VECTOR_STORE_ID,
             limit=10
         )
