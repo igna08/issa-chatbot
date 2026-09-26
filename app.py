@@ -686,11 +686,18 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             }
             
         except Exception as e:
-            logger.error(f"Error obteniendo respuesta: {e}", exc_info=True)
+            err_str = str(e)
+            if "insufficient_quota" in err_str or "credit_balance_exhausted" in err_str:
+                logger.error("🚨 SALDO AGOTADO EN OPENAI: Se requiere recargar créditos en https://platform.openai.com/settings/organization/billing/")
+                user_msg = "Disculpá, el asistente está temporalmente fuera de servicio por mantenimiento. Por favor comunicate directamente con el colegio o intentá más tarde."
+            else:
+                logger.error(f"Error obteniendo respuesta: {e}", exc_info=True)
+                user_msg = "Uy, disculpá, tengo un problemita técnico. ¿Podés intentar de nuevo?"
+            
             return {
-                "response": "Uy, disculpá, tengo un problemita técnico. ¿Podés intentar de nuevo?",
+                "response": user_msg,
                 "thread_id": conversation_id,
-                "error": str(e),
+                "error": err_str,
                 "success": False
             }
 
