@@ -690,6 +690,7 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             return {
                 "response": "Uy, disculpá, tengo un problemita técnico. ¿Podés intentar de nuevo?",
                 "thread_id": conversation_id,
+                "error": str(e),
                 "success": False
             }
 
@@ -840,6 +841,7 @@ def webhook_chat():
             "type": "text",
             "thread_id": result["thread_id"],
             "success": result["success"],
+            "error": result.get("error"),
             "timestamp": datetime.now().isoformat()
         })
     
