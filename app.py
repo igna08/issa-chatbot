@@ -32,6 +32,7 @@ WEBSITE_URL = os.getenv("WEBSITE_URL")
 SCHOOL_NAME = os.getenv("SCHOOL_NAME")
 OPENAI_ASSISTANT_ID = os.getenv("OPENAI_ASSISTANT_ID")
 OPENAI_VECTOR_STORE_ID = os.getenv("OPENAI_VECTOR_STORE_ID")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # Validar variables críticas
 if not OPENAI_API_KEY:
@@ -40,9 +41,6 @@ if not OPENAI_API_KEY:
 if not WEBSITE_URL:
     logger.error("WEBSITE_URL no encontrada en variables de entorno")
     raise ValueError("WEBSITE_URL es requerida")
-if not OPENAI_ASSISTANT_ID:
-    logger.error("OPENAI_ASSISTANT_ID no encontrada en variables de entorno")
-    raise ValueError("OPENAI_ASSISTANT_ID es requerida")
 if not OPENAI_VECTOR_STORE_ID:
     logger.error("OPENAI_VECTOR_STORE_ID no encontrada en variables de entorno")
     raise ValueError("OPENAI_VECTOR_STORE_ID es requerida")
@@ -459,26 +457,30 @@ class ImprovedWebScraper:
         return content_list
 
 class OpenAIAssistantManager:
-    """Maneja OpenAI Assistant + Vector Store"""
+    """Maneja OpenAI Responses API + Vector Store"""
     
-    def __init__(self, openai_api_key: str, assistant_id: str, vector_store_id: str, school_name: str):
+    def __init__(self, openai_api_key: str, assistant_id: str, vector_store_id: str, school_name: str, instructions: str = None):
         self.client = OpenAI(api_key=openai_api_key)
-        self.assistant_id = assistant_id
+        self.assistant_id = assistant_id or "responses_api"
         self.vector_store_id = vector_store_id
         self.school_name = school_name
         self.db_manager = DatabaseManager()
+        self.instructions = instructions or os.getenv("ASSISTANT_INSTRUCTIONS") or (
+            f"Sos Agustín, el asistente virtual oficial de {self.school_name} (Instituto Superior San Agustín). "
+            f"Tu objetivo es ayudar de forma clara, cordial y precisa a estudiantes, familias y futuros ingresantes sobre carreras, profesorados, tecnicaturas, inscripciones, aranceles, fechas y horarios. "
+            f"Usá siempre la herramienta de búsqueda de archivos (file search) sobre los documentos oficiales de la institución para responder con información precisa y actualizada. "
+            f"Respondé en español rioplatense natural (tuteo argentino respetuoso y cálido), con formato ordenado (listas y negritas cuando corresponda). "
+            f"Si algo no está en la documentación oficial, indicalo con honestidad y sugerí contactar directamente a la secretaría o administración del instituto. "
+            f"No muestres marcas internas de citación como 【...】 ni inventes datos no documentados."
+        )
         
-        # Verificar que el assistant y vector store existen
+        # Verificar que el vector store existe
         self._verify_resources()
     
     def _verify_resources(self):
-        """Verifica que el assistant y vector store existen"""
+        """Verifica que el vector store existe"""
         try:
-            # Verificar assistant - usar client.beta.assistants
-            assistant = self.client.beta.assistants.retrieve(self.assistant_id)
-            logger.info(f"✓ Assistant encontrado: {assistant.name}")
-            
-            # Verificar vector store - usar client.vector_stores (ya no está en beta)
+            # Verificar vector store
             vector_store = self.client.vector_stores.retrieve(self.vector_store_id)
             logger.info(f"✓ Vector Store encontrado: {vector_store.name}")
             
@@ -602,80 +604,92 @@ Fecha de captura: {content.last_updated.strftime('%Y-%m-%d %H:%M')}
             raise
     
     def get_response(self, user_message: str, external_id: str = None) -> Dict:
-        """Obtiene respuesta del assistant usando thread persistente"""
+        """Obtiene respuesta del assistant usando Responses API y persistencia de conversación"""
+        conversation_id = None
         try:
-            thread_id = None
-            
-            # Si hay external_id, buscar thread existente
+            # Si hay external_id, buscar conversación existente
             if external_id:
-                thread_id = self.db_manager.get_thread_id(external_id)
+                conversation_id = self.db_manager.get_thread_id(external_id)
             
-            # Crear thread si no existe
-            if not thread_id:
-                thread = self.client.beta.threads.create()
-                thread_id = thread.id
-                logger.info(f"🆕 Nuevo thread creado: {thread_id}")
-                
-                # Guardar mapeo si hay external_id
-                if external_id:
-                    self.db_manager.save_thread_mapping(external_id, thread_id)
+            # Crear conversación si no existe
+            if not conversation_id:
+                try:
+                    conv = self.client.conversations.create()
+                    conversation_id = conv.id
+                    logger.info(f"🆕 Nueva conversación creada: {conversation_id}")
+                    if external_id:
+                        self.db_manager.save_thread_mapping(external_id, conversation_id)
+                except Exception as e:
+                    logger.warning(f"No se pudo crear conversación persistente ({e}), continuando sin conversation_id")
+                    conversation_id = None
             else:
-                logger.info(f"🔄 Usando thread existente: {thread_id}")
+                logger.info(f"🔄 Usando conversación existente: {conversation_id}")
             
-            # Añadir mensaje del usuario
-            self.client.beta.threads.messages.create(
-                thread_id=thread_id,
-                role="user",
-                content=user_message
-            )
+            tools = [
+                {
+                    "type": "file_search",
+                    "vector_store_ids": [self.vector_store_id]
+                }
+            ]
             
-            # Ejecutar assistant
-            run = self.client.beta.threads.runs.create(
-                thread_id=thread_id,
-                assistant_id=self.assistant_id
-            )
+            def call_responses(conv_id):
+                kwargs = {
+                    "model": OPENAI_MODEL,
+                    "instructions": self.instructions,
+                    "input": user_message,
+                    "tools": tools,
+                }
+                if conv_id:
+                    kwargs["conversation"] = conv_id
+                return self.client.responses.create(**kwargs)
             
-            # Esperar respuesta
-            max_wait_time = 60  # 60 segundos máximo
-            wait_time = 0
+            try:
+                response = call_responses(conversation_id)
+            except Exception as e:
+                # Si falló porque el conversation_id expiró o no existe en OpenAI, crear una nueva y reintentar
+                if conversation_id and ("404" in str(e) or "not_found" in str(e).lower() or "conversation" in str(e).lower()):
+                    logger.warning(f"Conversación {conversation_id} no válida o expirada ({e}). Creando nueva...")
+                    try:
+                        conv = self.client.conversations.create()
+                        conversation_id = conv.id
+                        if external_id:
+                            self.db_manager.save_thread_mapping(external_id, conversation_id)
+                        response = call_responses(conversation_id)
+                    except Exception as e2:
+                        logger.warning(f"Fallback ejecutando respuesta sin conversación: {e2}")
+                        conversation_id = None
+                        response = call_responses(None)
+                else:
+                    raise
             
-            while run.status in ['queued', 'in_progress', 'cancelling'] and wait_time < max_wait_time:
-                time.sleep(1)
-                wait_time += 1
-                run = self.client.beta.threads.runs.retrieve(
-                    thread_id=thread_id,
-                    run_id=run.id
-                )
+            # Extraer contenido de la respuesta
+            response_content = ""
+            if hasattr(response, "output_text") and response.output_text:
+                response_content = response.output_text
+            elif hasattr(response, "output") and response.output:
+                for item in response.output:
+                    if getattr(item, "type", None) == "message" and hasattr(item, "content"):
+                        for block in item.content:
+                            if getattr(block, "type", None) == "output_text" and hasattr(block, "text"):
+                                response_content += block.text
             
-            if run.status == 'completed':
-                # Obtener mensajes
-                messages = self.client.beta.threads.messages.list(
-                    thread_id=thread_id,
-                    order='desc',
-                    limit=1
-                )
-                
-                if messages.data:
-                    response_content = messages.data[0].content[0].text.value
-                    
-                    return {
-                        "response": response_content,
-                        "thread_id": thread_id,
-                        "success": True
-                    }
+            if not response_content:
+                response_content = "Disculpá, no pude generar una respuesta en este momento. Por favor intentá nuevamente."
             
-            logger.error(f"Run falló con status: {run.status}")
+            # Limpiar anotaciones de fuentes (ej. 【4:0†source】)
+            response_content = re.sub(r'【[^】]+】', '', response_content).strip()
+            
             return {
-                "response": "Disculpá, tuve un problema técnico. Intentá de nuevo en un ratito.",
-                "thread_id": thread_id,
-                "success": False
+                "response": response_content,
+                "thread_id": conversation_id,
+                "success": True
             }
             
         except Exception as e:
-            logger.error(f"Error obteniendo respuesta: {e}")
+            logger.error(f"Error obteniendo respuesta: {e}", exc_info=True)
             return {
                 "response": "Uy, disculpá, tengo un problemita técnico. ¿Podés intentar de nuevo?",
-                "thread_id": thread_id,
+                "thread_id": conversation_id,
                 "success": False
             }
 
@@ -726,7 +740,7 @@ class SchoolAssistantWithVectorStore:
         """Obtiene respuesta del assistant"""
         return self.assistant_manager.get_response(user_message, external_id)
     
-def get_stats(self) -> Dict:
+    def get_stats(self) -> Dict:
         """Obtiene estadísticas del sistema"""
         try:
             tracking_data = self.assistant_manager.db_manager.get_content_tracking()
@@ -759,28 +773,31 @@ def init_assistant():
     global assistant
     
     try:
-        logger.info("🚀 Inicializando Agustín con OpenAI Assistant + Vector Store...")
+        logger.info("🚀 Inicializando Agustín con OpenAI Responses API + Vector Store...")
         logger.info(f"📋 Configuración:")
         logger.info(f"   - URL: {WEBSITE_URL}")
         logger.info(f"   - Escuela: {SCHOOL_NAME}")
-        logger.info(f"   - Assistant ID: {OPENAI_ASSISTANT_ID}")
         logger.info(f"   - Vector Store ID: {OPENAI_VECTOR_STORE_ID}")
         
         assistant = SchoolAssistantWithVectorStore(WEBSITE_URL, SCHOOL_NAME)
         
-        # Actualización inicial
-        logger.info("🔄 Realizando actualización inicial...")
-        result = assistant.update_knowledge_base()
-        
-        if result.get("success"):
-            logger.info("✅ Sistema completamente listo!")
-            return True
-        else:
-            logger.warning(f"⚠️ Actualización inicial con problemas: {result}")
-            return True  # Continuar aunque haya warnings
+        # Verificar estado del Vector Store en lugar de bloquear con scraping completo
+        try:
+            vs = assistant.assistant_manager.client.vector_stores.retrieve(OPENAI_VECTOR_STORE_ID)
+            file_count = getattr(vs.file_counts, "total", 0) if hasattr(vs, "file_counts") else 0
+            if file_count == 0:
+                logger.info("🔄 Vector Store sin archivos, ejecutando actualización inicial...")
+                assistant.update_knowledge_base()
+            else:
+                logger.info(f"✅ Vector Store listo con {file_count} documentos")
+        except Exception as vs_err:
+            logger.warning(f"No se pudo verificar archivos del vector store: {vs_err}")
+            
+        logger.info("✅ Sistema completamente listo!")
+        return True
             
     except Exception as e:
-        logger.error(f"❌ Error inicializando asistente: {e}")
+        logger.error(f"❌ Error inicializando asistente: {e}", exc_info=True)
         return False
 
 # Inicializar automáticamente
@@ -887,11 +904,11 @@ def health():
             
             # Verificar conexión con OpenAI
             try:
-                assistant_info = assistant.assistant_manager.client.beta.assistants.retrieve(
-                    OPENAI_ASSISTANT_ID
+                vs = assistant.assistant_manager.client.vector_stores.retrieve(
+                    OPENAI_VECTOR_STORE_ID
                 )
                 status["openai_connection"] = "✓ Conectado"
-                status["assistant_name"] = assistant_info.name
+                status["vector_store_name"] = vs.name
             except Exception as e:
                 status["openai_connection"] = f"✗ Error: {str(e)}"
                 
@@ -1055,12 +1072,12 @@ def home():
     
     return jsonify({
         "message": f"Agustín - Asistente de {SCHOOL_NAME}",
-        "version": "2.0 - OpenAI Assistant + Vector Store",
+        "version": "2.1 - OpenAI Responses API + Vector Store",
         "status": "running",
         "features": [
-            "OpenAI Assistant nativo integrado",
+            "OpenAI Responses API + Vector Store integrado",
             "Vector Store para base de conocimiento",
-            "Conversaciones persistentes por thread",
+            "Conversaciones persistentes",
             "Scraping exhaustivo automatizado",
             "Actualización automática de conocimiento",
             "Sistema de tracking de contenido"

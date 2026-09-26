@@ -1,7 +1,7 @@
 fastapi
 requests
 beautifulsoup4
-openai
+openai>=1.60.0
 schedule
 flask
 flask-cors
